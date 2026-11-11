@@ -20,6 +20,38 @@ apply_mail() {
   fi
   echo "POSTIZ_PATCH_APPLIED $1"
 }
+apply_agent_patchset() {
+  local tmp count n
+  tmp="$(mktemp -d)"
+  mkdir -p "$tmp/mails"
+  count="$(git mailsplit -o"$tmp/mails" "$PATCH_ROOT/postiz-local-agent.patch")"
+  if [[ "$count" != 6 ]];then
+    echo "AGENT_MAIL_COUNT_CHANGED=$count" >&2
+    exit 1
+  fi
+  git mailinfo "$tmp/first.message" "$tmp/first.diff" < "$tmp/mails/0001" >/dev/null
+  local opts=(
+    --include=libraries/nestjs-libraries/src/chat/tools/local.media.path.ts
+    --include=libraries/nestjs-libraries/src/chat/tools/next.posting.slot.tool.ts
+    --include=libraries/nestjs-libraries/src/chat/tools/transcribe.local.media.tool.ts
+    --include=libraries/nestjs-libraries/src/chat/tools/upload.local.media.tool.ts
+  )
+  git apply --check "${opts[@]}" "$tmp/first.diff"
+  git apply "${opts[@]}" "$tmp/first.diff"
+  python3 "$PATCH_ROOT/../scripts/rebase_local_agent_initial.py" "$PWD" "$tmp/first.diff"
+  git add     libraries/nestjs-libraries/src/chat/load.tools.service.ts     libraries/nestjs-libraries/src/chat/tools/tool.list.ts     libraries/nestjs-libraries/src/chat/tools/local.media.path.ts     libraries/nestjs-libraries/src/chat/tools/next.posting.slot.tool.ts     libraries/nestjs-libraries/src/chat/tools/transcribe.local.media.tool.ts     libraries/nestjs-libraries/src/chat/tools/upload.local.media.tool.ts
+  git commit --no-gpg-sign -m "feat: local media workflow rebased onto native Postiz agent tool list" -q
+  for n in 0002 0003 0004 0005 0006;do
+    if ! git am -3 "$tmp/mails/$n";then
+      echo "POSTIZ_AGENT_LATER_MAIL_CONFLICT=$n" >&2
+      git am --show-current-patch=diff >/tmp/cloud9-postiz-agent-conflict.diff || true
+      git apply --check --verbose /tmp/cloud9-postiz-agent-conflict.diff 2>&1 | head -75 || true
+      exit 1
+    fi
+  done
+  rm -rf "$tmp"
+  echo POSTIZ_PATCH_APPLIED postiz-local-agent.patch
+}
 if [[ ! -f libraries/nestjs-libraries/src/upload/s3.storage.ts ]];then
   # The last historical S3 mail references old import ordering in three Next
   # layouts. Apply the first three upstream-compatible mails without change,
@@ -53,10 +85,10 @@ if [[ ! -f libraries/nestjs-libraries/src/upload/s3.storage.ts ]];then
   git commit --no-gpg-sign -m "fix: version-aware local upload ingress for upstream layouts" -q
   rm -rf "$tmp"
   echo POSTIZ_PATCH_APPLIED postiz-s3.patch
-  apply_mail postiz-local-agent.patch
+  apply_agent_patchset
 else
   echo POSTIZ_NATIVE_S3_DETECTED
-  apply_mail postiz-local-agent.patch
+  apply_agent_patchset
 fi
 if grep -qs 'async creatorInfo(accessToken' libraries/nestjs-libraries/src/integrations/social/tiktok.provider.ts &&
    grep -qs 'privacy_level_options' apps/frontend/src/components/new-launch/providers/tiktok/tiktok.provider.tsx &&
