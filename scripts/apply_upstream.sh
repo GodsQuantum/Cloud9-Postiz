@@ -42,12 +42,33 @@ apply_agent_patchset() {
   git add     libraries/nestjs-libraries/src/chat/load.tools.service.ts     libraries/nestjs-libraries/src/chat/tools/tool.list.ts     libraries/nestjs-libraries/src/chat/tools/local.media.path.ts     libraries/nestjs-libraries/src/chat/tools/next.posting.slot.tool.ts     libraries/nestjs-libraries/src/chat/tools/transcribe.local.media.tool.ts     libraries/nestjs-libraries/src/chat/tools/upload.local.media.tool.ts
   git commit --no-gpg-sign -m "feat: local media workflow rebased onto native Postiz agent tool list" -q
   for n in 0002 0003 0004 0005 0006;do
-    if ! git am -3 "$tmp/mails/$n";then
-      echo "POSTIZ_AGENT_LATER_MAIL_CONFLICT=$n" >&2
-      git am --show-current-patch=diff >/tmp/cloud9-postiz-agent-conflict.diff || true
-      git apply --check --verbose /tmp/cloud9-postiz-agent-conflict.diff 2>&1 | head -75 || true
-      exit 1
-    fi
+    git mailinfo "$tmp/message-$n" "$tmp/patch-$n" < "$tmp/mails/$n" >/dev/null
+    case "$n" in
+      0002)
+        python3 "$PATCH_ROOT/../scripts/rebase_agent_followups.py" 2 "$PWD" "$tmp/patch-$n"
+        ;;
+      0003)
+        git apply --check           --exclude=libraries/nestjs-libraries/src/chat/load.tools.service.ts           --exclude=libraries/nestjs-libraries/src/chat/tools/tool.list.ts           "$tmp/patch-$n"
+        git apply           --exclude=libraries/nestjs-libraries/src/chat/load.tools.service.ts           --exclude=libraries/nestjs-libraries/src/chat/tools/tool.list.ts           "$tmp/patch-$n"
+        python3 "$PATCH_ROOT/../scripts/rebase_agent_followups.py" 3 "$PWD" "$tmp/patch-$n"
+        ;;
+      0004)
+        git apply --check "$tmp/patch-$n"
+        git apply "$tmp/patch-$n"
+        ;;
+      0005)
+        # The next mail removes all personal creator-copy instructions.
+        # Keep only the upstream-safe post-list improvements here.
+        git apply --check           --exclude=libraries/nestjs-libraries/src/chat/load.tools.service.ts           "$tmp/patch-$n"
+        git apply           --exclude=libraries/nestjs-libraries/src/chat/load.tools.service.ts           "$tmp/patch-$n"
+        ;;
+      0006)
+        python3 "$PATCH_ROOT/../scripts/rebase_agent_followups.py" 6 "$PWD" "$tmp/patch-$n"
+        ;;
+    esac
+    git add -A
+    git commit --no-gpg-sign -m "feat: rebase upstream Postiz agent enhancement $n" -q
+    echo "POSTIZ_AGENT_STAGE_REBASED $n"
   done
   rm -rf "$tmp"
   echo POSTIZ_PATCH_APPLIED postiz-local-agent.patch
