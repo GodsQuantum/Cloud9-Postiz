@@ -21,7 +21,38 @@ apply_mail() {
   echo "POSTIZ_PATCH_APPLIED $1"
 }
 if [[ ! -f libraries/nestjs-libraries/src/upload/s3.storage.ts ]];then
-  apply_mail postiz-s3.patch
+  # The last historical S3 mail references old import ordering in three Next
+  # layouts. Apply the first three upstream-compatible mails without change,
+  # then apply its new helper and .env snippet and rebase only the specific
+  # provider references rather than overwriting upstream layouts.
+  tmp="$(mktemp -d)"
+  mkdir -p "$tmp/mails"
+  count="$(git mailsplit -o"$tmp/mails" "$PATCH_ROOT/postiz-s3.patch")"
+  if [[ "$count" != 4 ]];then
+    echo "S3_MAIL_COUNT_CHANGED=$count" >&2
+    exit 1
+  fi
+  for n in 0001 0002 0003;do
+    git am -3 "$tmp/mails/$n"
+  done
+  git mailinfo "$tmp/final.message" "$tmp/final.diff" < "$tmp/mails/0004" >/dev/null
+  git apply --check \
+    --include=.env.example \
+    --include=apps/frontend/src/helpers/upload.provider.ts \
+    "$tmp/final.diff"
+  git apply \
+    --include=.env.example \
+    --include=apps/frontend/src/helpers/upload.provider.ts \
+    "$tmp/final.diff"
+  python3 "$PATCH_ROOT/../scripts/rebase_local_upload_layouts.py" "$PWD"
+  git add .env.example apps/frontend/src/helpers/upload.provider.ts \
+    'apps/frontend/src/app/(app)/layout.tsx' \
+    'apps/frontend/src/app/(extension)/layout.tsx' \
+    'apps/frontend/src/app/(provider)/layout.tsx'
+  git diff --cached --check
+  git commit --no-gpg-sign -m "fix: version-aware local upload ingress for upstream layouts" -q
+  rm -rf "$tmp"
+  echo POSTIZ_PATCH_APPLIED postiz-s3.patch
   apply_mail postiz-local-agent.patch
 else
   echo POSTIZ_NATIVE_S3_DETECTED
