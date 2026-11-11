@@ -37,7 +37,7 @@ jobs:
           UPSTREAM_TAG: ${{ steps.upstream.outputs.tag }}
         run: |
           set -euo pipefail
-          git clone --depth 1 --branch "$UPSTREAM_TAG" https://github.com/gitroomhq/postiz-app.git upstream
+          git clone --filter=blob:none --branch "$UPSTREAM_TAG" https://github.com/gitroomhq/postiz-app.git upstream
           bash scripts/apply_upstream.sh upstream | tee /tmp/postiz-rebase.log
           grep -F 'POSTIZ_SEVEN_PATCH_FAMILIES_CONDITIONAL_APPLY_PASS' /tmp/postiz-rebase.log
           git -C upstream diff --check
