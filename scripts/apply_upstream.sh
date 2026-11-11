@@ -53,8 +53,7 @@ apply_agent_patchset() {
         python3 "$PATCH_ROOT/../scripts/rebase_agent_followups.py" 3 "$PWD" "$tmp/patch-$n"
         ;;
       0004)
-        git apply --check "$tmp/patch-$n"
-        git apply "$tmp/patch-$n"
+        python3 "$PATCH_ROOT/../scripts/rebase_agent_followups.py" 4 "$PWD" "$tmp/patch-$n"
         ;;
       0005)
         # The next mail removes all personal creator-copy instructions.

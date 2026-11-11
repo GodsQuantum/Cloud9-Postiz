@@ -53,6 +53,25 @@ elif stage==3:
  s=replace_once(s,anchor,anchor+"\n"+"\n".join(members),tools)
  p.write_text(s)
  print("POSTIZ_AGENT_ANALYTICS_AND_ADAPTIVE_SCHEDULING_REBASED")
+elif stage==4:
+ target="libraries/nestjs-libraries/src/database/prisma/posts/posts.service.ts"
+ fragment=hunks(target)
+ assert len(fragment)==1
+ addition=additions(fragment[0])
+ assert len(addition)==8 and "Unicode replacement characters" in "\n".join(addition)
+ p=base/target
+ s=p.read_text()
+ anchor="  ): Promise<any[]> {"
+ assert s.count(anchor)>=1
+ signature="  async createPost("
+ assert s.count(signature)==1
+ start=s.index(signature)
+ insert=s.index(anchor,start)+len(anchor)
+ assert "const postList = [];" in s[insert:insert+180]
+ assert "Post contains Unicode replacement characters" not in s
+ s=s[:insert]+"\n"+"\n".join(addition)+s[insert:]
+ p.write_text(s)
+ print("POSTIZ_UNICODE_REPLACEMENT_GUARD_REBASED_AT_CURRENT_POST_CREATION_METHOD")
 elif stage==6:
  fragments=hunks(load)
  assert len(fragments)==4,("EDITORIAL_PROFILE_PATCH_CHANGED",len(fragments))
