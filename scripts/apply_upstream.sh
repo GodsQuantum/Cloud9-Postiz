@@ -12,7 +12,12 @@ echo "UPSTREAM_POSTIZ_COMMIT=$(git rev-parse HEAD)"
 apply_mail() {
   local file="$PATCH_ROOT/$1"
   test -s "$file"
-  git am -3 "$file"
+  if ! git am -3 "$file";then
+    echo "POSTIZ_PATCH_CONFLICT $1 — exact failing paths follow" >&2
+    git am --show-current-patch=diff >/tmp/cloud9-postiz-conflict.diff || true
+    git apply --check --verbose /tmp/cloud9-postiz-conflict.diff 2>&1 | head -80 || true
+    exit 1
+  fi
   echo "POSTIZ_PATCH_APPLIED $1"
 }
 if [[ ! -f libraries/nestjs-libraries/src/upload/s3.storage.ts ]];then
