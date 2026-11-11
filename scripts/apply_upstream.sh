@@ -115,7 +115,15 @@ if grep -qs 'async creatorInfo(accessToken' libraries/nestjs-libraries/src/integ
    test -f 'apps/frontend/src/app/(public)/review/page.tsx';then
   echo POSTIZ_NATIVE_TIKTOK_AUDIT_DETECTED
 else
-  apply_mail postiz-tiktok-audit.patch
+  tmp="$(mktemp -d)"
+  git mailinfo "$tmp/message" "$tmp/audit.diff" < "$PATCH_ROOT/postiz-tiktok-audit.patch" >/dev/null
+  git apply --check --exclude=apps/frontend/src/proxy.ts "$tmp/audit.diff"
+  git apply --exclude=apps/frontend/src/proxy.ts "$tmp/audit.diff"
+  python3 "$PATCH_ROOT/../scripts/rebase_tiktok_public_routes.py" "$PWD"
+  git add -A
+  git commit --no-gpg-sign -m "feat: TikTok Direct Post audit compliance with native OAuth route preserved" -q
+  rm -rf "$tmp"
+  echo POSTIZ_PATCH_APPLIED postiz-tiktok-audit.patch
 fi
 if grep -qs 'disable_auto_auth=1' libraries/nestjs-libraries/src/integrations/social/tiktok.provider.ts;then
   echo POSTIZ_NATIVE_TIKTOK_ACCOUNT_CHOOSER_DETECTED
