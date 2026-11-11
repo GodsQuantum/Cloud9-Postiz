@@ -154,7 +154,29 @@ if grep -Rqs 'POSTIZ_LLM_BASE_URL' apps/backend/src libraries/nestjs-libraries/s
    grep -qs 'postizLlm.chat(postizLlmModel)' libraries/nestjs-libraries/src/chat/load.tools.service.ts;then
   echo POSTIZ_NATIVE_LLM_ORIGIN_DETECTED
 else
-  apply_mail postiz-omniroute.patch
+  tmp="$(mktemp -d)"
+  mkdir -p "$tmp/mails"
+  count="$(git mailsplit -o"$tmp/mails" "$PATCH_ROOT/postiz-omniroute.patch")"
+  if [[ "$count" != 3 ]];then
+    echo "OMNIROUTE_LLM_MAIL_COUNT_CHANGED=$count" >&2
+    exit 1
+  fi
+  git mailinfo "$tmp/first.message" "$tmp/first.diff" < "$tmp/mails/0001" >/dev/null
+  git apply --check --exclude=libraries/nestjs-libraries/src/chat/load.tools.service.ts "$tmp/first.diff"
+  git apply --exclude=libraries/nestjs-libraries/src/chat/load.tools.service.ts "$tmp/first.diff"
+  python3 "$PATCH_ROOT/../scripts/rebase_omniroute_llm_agent.py" "$PWD"
+  git add -A
+  git commit --no-gpg-sign -m "feat: OmniRoute compatible LLM backend preserving native Postiz agent" -q
+  for n in 0002 0003;do
+    if ! git am -3 "$tmp/mails/$n";then
+      echo "POSTIZ_OMNIROUTE_LATER_MAIL_CONFLICT=$n" >&2
+      git am --show-current-patch=diff >/tmp/cloud9-postiz-omniroute-conflict.diff || true
+      git apply --check --verbose /tmp/cloud9-postiz-omniroute-conflict.diff 2>&1 | head -60 || true
+      exit 1
+    fi
+  done
+  rm -rf "$tmp"
+  echo POSTIZ_PATCH_APPLIED postiz-omniroute.patch
 fi
 printf '\n# CLOUD9_ROOT_MODE_0755\nRUN chmod 0755 /\n' >> Dockerfile.dev
 git diff --check
