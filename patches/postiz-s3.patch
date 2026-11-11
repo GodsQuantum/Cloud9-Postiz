@@ -1,0 +1,1030 @@
+From b74f85e30ac0e79f44da791a78a3f41e869a6c1f Mon Sep 17 00:00:00 2001
+From: cloud9-postiz-builder <root@cloud9.local>
+Date: Fri, 18 Sep 2026 15:59:05 +0200
+Subject: [PATCH] feat: transient S3 ingress with local Postiz media storage
+
+---
+ .env.example                                  |   9 +
+ .../src/api/routes/media.controller.ts        |  17 +-
+ apps/frontend/src/app/(app)/layout.tsx        |  10 +-
+ apps/frontend/src/app/(extension)/layout.tsx  |  10 +-
+ apps/frontend/src/app/(provider)/layout.tsx   |  10 +-
+ .../src/components/media/new.uploader.tsx     |  11 +-
+ .../src/upload/r2.uploader.ts                 |   1 -
+ .../nestjs-libraries/src/upload/s3.storage.ts |  61 ++++
+ .../src/upload/s3.uploader.ts                 | 288 ++++++++++++++++++
+ .../src/upload/upload.factory.ts              |  16 +-
+ .../src/helpers/uppy.upload.ts                |   1 +
+ .../src/helpers/use.media.directory.ts        |  36 ++-
+ .../src/helpers/variable.context.tsx          |   2 +-
+ .../react-shared-libraries/tsconfig.json      |   1 +
+ 14 files changed, 453 insertions(+), 20 deletions(-)
+ create mode 100644 libraries/nestjs-libraries/src/upload/s3.storage.ts
+ create mode 100644 libraries/nestjs-libraries/src/upload/s3.uploader.ts
+
+diff --git a/.env.example b/.env.example
+index 9397f2d..c7f3947 100644
+--- a/.env.example
++++ b/.env.example
+@@ -32,6 +32,15 @@ CLOUDFLARE_REGION="auto"
+ #RUNPOD_CLIPPER_ENDPOINT_ID=""
+ #DEEPGRAM_API_KEY=""
+ 
++## S3 / S3-compatible storage (AWS S3, MinIO, DigitalOcean Spaces, Backblaze B2)
++## Set STORAGE_PROVIDER=s3 to use this instead of Cloudflare R2.
++# S3_ACCESS_KEY=""
++# S3_SECRET_KEY=""
++# S3_BUCKET=""
++# S3_REGION="us-east-1"
++# S3_BUCKET_URL="https://your-bucket.s3.amazonaws.com"
++# S3_ENDPOINT=
++
+ # === Common optional Settings
+ 
+ ## This is a dummy key, you must create your own from Resend.
+diff --git a/apps/backend/src/api/routes/media.controller.ts b/apps/backend/src/api/routes/media.controller.ts
+index 3c6902e..e099934 100644
+--- a/apps/backend/src/api/routes/media.controller.ts
++++ b/apps/backend/src/api/routes/media.controller.ts
+@@ -18,6 +18,7 @@ import { Organization } from '@prisma/client';
+ import { MediaService } from '@gitroom/nestjs-libraries/database/prisma/media/media.service';
+ import { ApiTags } from '@nestjs/swagger';
+ import handleR2Upload from '@gitroom/nestjs-libraries/upload/r2.uploader';
++import handleS3Upload from '@gitroom/nestjs-libraries/upload/s3.uploader';
+ import { FileInterceptor } from '@nestjs/platform-express';
+ import { streamUploadOptions } from '@gitroom/nestjs-libraries/upload/multer.stream.engine';
+ import { SubscriptionService } from '@gitroom/nestjs-libraries/database/prisma/subscriptions/subscription.service';
+@@ -157,25 +158,31 @@ export class MediaController {
+     @Res() res: Response,
+     @Param('endpoint') endpoint: string
+   ) {
+-    const upload = await handleR2Upload(endpoint, req, res);
++    const storageProvider = process.env.STORAGE_PROVIDER || local;
++    const upload = await (storageProvider === s3
++      ? handleS3Upload
++      : handleR2Upload)(endpoint, req, res);
+     // a rejected or failed completion has already answered with its own status
+     if (endpoint !== 'complete-multipart-upload' || res.headersSent) {
+       return upload;
+     }
++    const completedUpload = upload as any;
++    if (!completedUpload || typeof completedUpload.Location !== 'string') {
++      return res.status(502).json({ message: 'Upload finalization failed.' });
++    }
+ 
+-    // @ts-ignore
+-    const name = upload.Location.split('/').pop();
++    const name = completedUpload.Location.split('/').pop();
+     const originalName = req.body?.file?.name;
+ 
+     const saveFile = await this._mediaService.saveUploadedFile(
+       org.id,
+       name,
+       // @ts-ignore
+-      upload.Location,
++      completedUpload.Location,
+       originalName || undefined
+     );
+ 
+-    res.status(200).json({ ...upload, saved: saveFile });
++    res.status(200).json({ ...completedUpload, saved: saveFile });
+   }
+ 
+   @Get('/:id/status')
+diff --git a/apps/frontend/src/app/(app)/layout.tsx b/apps/frontend/src/app/(app)/layout.tsx
+index cc1cc4f..5014612 100644
+--- a/apps/frontend/src/app/(app)/layout.tsx
++++ b/apps/frontend/src/app/(app)/layout.tsx
+@@ -56,7 +56,7 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
+       >
+         <VariableContextComponent
+           storageProvider={
+-            process.env.STORAGE_PROVIDER! as 'local' | 'cloudflare'
++            process.env.STORAGE_PROVIDER! as 'local' | 'cloudflare' | 's3'
+           }
+           environment={process.env.NODE_ENV!}
+           backendUrl={process.env.NEXT_PUBLIC_BACKEND_URL!}
+@@ -71,7 +71,13 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
+           oauthLogoUrl={process.env.NEXT_PUBLIC_POSTIZ_OAUTH_LOGO_URL!}
+           oauthDisplayName={process.env.NEXT_PUBLIC_POSTIZ_OAUTH_DISPLAY_NAME!}
+           uploadDirectory={process.env.NEXT_PUBLIC_UPLOAD_STATIC_DIRECTORY!}
+-          cloudflareUrl={process.env.CLOUDFLARE_BUCKET_URL || ''}
++          cloudflareUrl={
++            process.env.STORAGE_PROVIDER === 's3'
++              ? process.env.S3_BUCKET_URL || ''
++              : process.env.STORAGE_PROVIDER === 'cloudflare'
++              ? process.env.CLOUDFLARE_BUCKET_URL || ''
++              : ''
++          }
+           mainUrl={process.env.MAIN_URL || ''}
+           mcpUrl={process.env.MCP_URL}
+           dub={!!process.env.STRIPE_PUBLISHABLE_KEY}
+diff --git a/apps/frontend/src/app/(extension)/layout.tsx b/apps/frontend/src/app/(extension)/layout.tsx
+index db1fe6d..0433a5a 100644
+--- a/apps/frontend/src/app/(extension)/layout.tsx
++++ b/apps/frontend/src/app/(extension)/layout.tsx
+@@ -27,7 +27,7 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
+         <VariableContextComponent
+           language="en"
+           storageProvider={
+-            process.env.STORAGE_PROVIDER! as 'local' | 'cloudflare'
++            process.env.STORAGE_PROVIDER! as 'local' | 'cloudflare' | 's3'
+           }
+           stripeClient=""
+           environment={process.env.NODE_ENV!}
+@@ -41,7 +41,13 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
+           oauthLogoUrl={process.env.NEXT_PUBLIC_POSTIZ_OAUTH_LOGO_URL!}
+           oauthDisplayName={process.env.NEXT_PUBLIC_POSTIZ_OAUTH_DISPLAY_NAME!}
+           uploadDirectory={process.env.NEXT_PUBLIC_UPLOAD_STATIC_DIRECTORY!}
+-          cloudflareUrl={process.env.CLOUDFLARE_BUCKET_URL || ''}
++          cloudflareUrl={
++            process.env.STORAGE_PROVIDER === 's3'
++              ? process.env.S3_BUCKET_URL || ''
++              : process.env.STORAGE_PROVIDER === 'cloudflare'
++              ? process.env.CLOUDFLARE_BUCKET_URL || ''
++              : ''
++          }
+           mainUrl={process.env.MAIN_URL || ''}
+           mcpUrl={process.env.MCP_URL}
+           dub={false}
+diff --git a/apps/frontend/src/app/(provider)/layout.tsx b/apps/frontend/src/app/(provider)/layout.tsx
+index 149f45b..b64f614 100644
+--- a/apps/frontend/src/app/(provider)/layout.tsx
++++ b/apps/frontend/src/app/(provider)/layout.tsx
+@@ -29,7 +29,7 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
+         <VariableContextComponent
+           language="en"
+           storageProvider={
+-            process.env.STORAGE_PROVIDER! as 'local' | 'cloudflare'
++            process.env.STORAGE_PROVIDER! as 'local' | 'cloudflare' | 's3'
+           }
+           stripeClient=""
+           environment={process.env.NODE_ENV!}
+@@ -43,7 +43,13 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
+           oauthLogoUrl={process.env.NEXT_PUBLIC_POSTIZ_OAUTH_LOGO_URL!}
+           oauthDisplayName={process.env.NEXT_PUBLIC_POSTIZ_OAUTH_DISPLAY_NAME!}
+           uploadDirectory={process.env.NEXT_PUBLIC_UPLOAD_STATIC_DIRECTORY!}
+-          cloudflareUrl={process.env.CLOUDFLARE_BUCKET_URL || ''}
++          cloudflareUrl={
++            process.env.STORAGE_PROVIDER === 's3'
++              ? process.env.S3_BUCKET_URL || ''
++              : process.env.STORAGE_PROVIDER === 'cloudflare'
++              ? process.env.CLOUDFLARE_BUCKET_URL || ''
++              : ''
++          }
+           mainUrl={process.env.MAIN_URL || ''}
+           mcpUrl={process.env.MCP_URL}
+           dub={false}
+diff --git a/apps/frontend/src/components/media/new.uploader.tsx b/apps/frontend/src/components/media/new.uploader.tsx
+index 532dc01..bd2f7ad 100644
+--- a/apps/frontend/src/components/media/new.uploader.tsx
++++ b/apps/frontend/src/components/media/new.uploader.tsx
+@@ -216,7 +216,10 @@ export function useUppyUploader(props: {
+     uppy2.on('file-added', (file) => {
+       setLocked(true);
+       uppy2.setFileMeta(file.id, {
+-        useCloudflare: storageProvider === 'cloudflare' ? 'true' : 'false', // Example of adding a custom field
++        useCloudflare:
++          storageProvider === 'cloudflare' || storageProvider === 's3'
++            ? 'true'
++            : 'false', // Example of adding a custom field
+         addedOrder: fileOrderIndex++, // Track original order for sorting after upload
+         // Add more fields as needed
+       });
+@@ -254,7 +257,11 @@ export function useUppyUploader(props: {
+       if (useTransloadit) {
+         // @ts-ignore
+         const allRes = result.transloadit[0].results;
+-        const toSave = uniqBy<{ name: string; originalName: string; order: number }>(
++        const toSave = uniqBy<{
++          name: string;
++          originalName: string;
++          order: number;
++        }>(
+           // @ts-ignore
+           Object.values(allRes).flatMap((p: any[]) => {
+             return p.flatMap((item) => ({
+diff --git a/libraries/nestjs-libraries/src/upload/r2.uploader.ts b/libraries/nestjs-libraries/src/upload/r2.uploader.ts
+index f753c49..c1b6528 100644
+--- a/libraries/nestjs-libraries/src/upload/r2.uploader.ts
++++ b/libraries/nestjs-libraries/src/upload/r2.uploader.ts
+@@ -289,7 +289,6 @@ export async function signPart(req: Request, res: Response) {
+     Key: key,
+     PartNumber: partNumber,
+     UploadId: uploadId,
+-    Expires: 3600,
+   };
+ 
+   const command = new UploadPartCommand({ ...params });
+diff --git a/libraries/nestjs-libraries/src/upload/s3.storage.ts b/libraries/nestjs-libraries/src/upload/s3.storage.ts
+new file mode 100644
+index 0000000..2148f9e
+--- /dev/null
++++ b/libraries/nestjs-libraries/src/upload/s3.storage.ts
+@@ -0,0 +1,61 @@
++import 'multer';
++import { unlink } from 'fs';
++import path from 'path';
++import { IUploadProvider } from './upload.interface';
++import { LocalStorage } from './local.storage';
++
++/**
++ * Hybrid S3 staging provider.
++ *
++ * Browser multipart uploads use Garage only as a temporary ingress path.
++ * Server-side/simple uploads are written directly to Postiz local storage.
++ * No completed media should remain in Garage.
++ */
++class S3Storage implements IUploadProvider {
++  private readonly local: LocalStorage;
++
++  constructor(
++    _accessKey: string,
++    _secretKey: string,
++    _region: string,
++    _bucketName: string,
++    _uploadUrl: string,
++    _endpoint?: string
++  ) {
++    this.local = new LocalStorage(process.env.UPLOAD_DIRECTORY!);
++  }
++
++  async uploadSimple(source: string) {
++    return this.local.uploadSimple(source);
++  }
++
++  async uploadFile(file: Express.Multer.File): Promise<any> {
++    return this.local.uploadFile(file);
++  }
++
++  async removeFile(filePath: string): Promise<void> {
++    const prefix = `${process.env.FRONTEND_URL}/uploads/`;
++    const uploadRoot = path.resolve(process.env.UPLOAD_DIRECTORY!);
++    const relative = filePath.startsWith(prefix)
++      ? filePath.slice(prefix.length)
++      : filePath.replace(/^\/+/, '');
++    const target = path.resolve(uploadRoot, relative);
++
++    if (!target.startsWith(uploadRoot + path.sep)) {
++      throw new Error('Refusing to delete outside upload directory.');
++    }
++
++    return new Promise((resolve, reject) => {
++      unlink(target, (err) => {
++        if (!err || (err as NodeJS.ErrnoException).code === 'ENOENT') {
++          resolve();
++        } else {
++          reject(err);
++        }
++      });
++    });
++  }
++}
++
++export { S3Storage };
++export default S3Storage;
+diff --git a/libraries/nestjs-libraries/src/upload/s3.uploader.ts b/libraries/nestjs-libraries/src/upload/s3.uploader.ts
+new file mode 100644
+index 0000000..8473004
+--- /dev/null
++++ b/libraries/nestjs-libraries/src/upload/s3.uploader.ts
+@@ -0,0 +1,288 @@
++import {
++  UploadPartCommand,
++  S3Client,
++  ListPartsCommand,
++  CreateMultipartUploadCommand,
++  CompleteMultipartUploadCommand,
++  AbortMultipartUploadCommand,
++  PutObjectCommand,
++  GetObjectCommand,
++  DeleteObjectCommand,
++} from '@aws-sdk/client-s3';
++import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
++import { Request, Response } from 'express';
++import path from 'path';
++import { closeSync, createWriteStream, mkdirSync, openSync, readSync, renameSync, rmSync } from 'fs';
++import { pipeline } from 'stream/promises';
++import { makeId } from '@gitroom/nestjs-libraries/services/make.is';
++// eslint-disable-next-line @typescript-eslint/no-var-requires
++const { fileTypeFromBuffer } = require('file-type');
++
++const ALLOWED_EXT_TO_MIME: Record<string, string> = {
++  '.jpg': 'image/jpeg',
++  '.jpeg': 'image/jpeg',
++  '.png': 'image/png',
++  '.gif': 'image/gif',
++  '.webp': 'image/webp',
++  '.avif': 'image/avif',
++  '.bmp': 'image/bmp',
++  '.tif': 'image/tiff',
++  '.tiff': 'image/tiff',
++  '.mp4': 'video/mp4',
++};
++
++function normalizeExtension(filename: string): string | null {
++  const ext = path.extname(filename || '').toLowerCase();
++  return ALLOWED_EXT_TO_MIME[ext] ? ext : null;
++}
++
++let _s3Client: S3Client | null = null;
++
++function getS3Client(): S3Client {
++  if (!_s3Client) {
++    _s3Client = new S3Client({
++      requestChecksumCalculation: 'WHEN_REQUIRED',
++      region: process.env.S3_REGION || 'us-east-1',
++      credentials: {
++        accessKeyId: process.env.S3_ACCESS_KEY!,
++        secretAccessKey: process.env.S3_SECRET_KEY!,
++      },
++      ...(process.env.S3_ENDPOINT
++        ? { endpoint: process.env.S3_ENDPOINT, forcePathStyle: true }
++        : {}),
++    });
++  }
++  return _s3Client;
++}
++
++function generateRandomString() {
++  return makeId(20);
++}
++
++function getPublicUrl(key: string) {
++  return `${process.env.S3_BUCKET_URL?.replace(/\/+$/, '')}/${key}`;
++}
++
++export default async function handleS3Upload(
++  endpoint: string,
++  req: Request,
++  res: Response
++) {
++  switch (endpoint) {
++    case 'create-multipart-upload':
++      return createMultipartUpload(req, res);
++    case 'prepare-upload-parts':
++      return prepareUploadParts(req, res);
++    case 'complete-multipart-upload':
++      return completeMultipartUpload(req, res);
++    case 'list-parts':
++      return listParts(req, res);
++    case 'abort-multipart-upload':
++      return abortMultipartUpload(req, res);
++    case 'sign-part':
++      return signPart(req, res);
++  }
++  return res.status(404).end();
++}
++
++export async function simpleUpload(
++  data: Buffer,
++  originalFilename: string,
++  _contentType: string
++) {
++  const detected = await fileTypeFromBuffer(data);
++  if (!detected || !Object.values(ALLOWED_EXT_TO_MIME).includes(detected.mime)) {
++    throw new Error('Unsupported file type.');
++  }
++  const fileExtension = `.${detected.ext}`;
++  const safeContentType = detected.mime;
++  const randomFilename = generateRandomString() + fileExtension;
++
++  const command = new PutObjectCommand({
++    Bucket: process.env.S3_BUCKET,
++    Key: randomFilename,
++    Body: data,
++    ContentType: safeContentType,
++  });
++
++  await getS3Client().send(command);
++
++  return getPublicUrl(randomFilename);
++}
++
++export async function createMultipartUpload(req: Request, res: Response) {
++  const { file, fileHash } = req.body;
++  const safeExt = normalizeExtension(file?.name || '');
++  if (!safeExt) {
++    return res.status(400).json({ message: 'Unsupported file type.' });
++  }
++  const safeContentType = ALLOWED_EXT_TO_MIME[safeExt];
++  const randomFilename = generateRandomString() + safeExt;
++
++  try {
++    const command = new CreateMultipartUploadCommand({
++      Bucket: process.env.S3_BUCKET,
++      Key: randomFilename,
++      ContentType: safeContentType,
++      Metadata: {
++        'x-amz-meta-file-hash': fileHash,
++      },
++    });
++    const response = await getS3Client().send(command);
++    return res.status(200).json({
++      uploadId: response.UploadId,
++      key: response.Key,
++    });
++  } catch (err) {
++    console.log('Error', err);
++    return res.status(500).json({ source: { status: 500 } });
++  }
++}
++
++export async function prepareUploadParts(req: Request, res: Response) {
++  const { partData } = req.body;
++  const parts = partData.parts;
++  const response = { presignedUrls: {} };
++
++  for (const part of parts) {
++    try {
++      const command = new UploadPartCommand({
++        Bucket: process.env.S3_BUCKET,
++        Key: partData.key,
++        PartNumber: part.number,
++        UploadId: partData.uploadId,
++      });
++      const url = await getSignedUrl(getS3Client(), command, { expiresIn: 3600 });
++      // @ts-ignore
++      response.presignedUrls[part.number] = url;
++    } catch (err) {
++      console.log('Error', err);
++      return res.status(500).json(err);
++    }
++  }
++
++  return res.status(200).json(response);
++}
++
++export async function listParts(req: Request, res: Response) {
++  const { key, uploadId } = req.body;
++
++  try {
++    const command = new ListPartsCommand({
++      Bucket: process.env.S3_BUCKET,
++      Key: key,
++      UploadId: uploadId,
++    });
++    const response = await getS3Client().send(command);
++    return res.status(200).json(response['Parts']);
++  } catch (err) {
++    console.log('Error', err);
++    return res.status(500).json(err);
++  }
++}
++
++export async function completeMultipartUpload(req: Request, res: Response) {
++  const { key, uploadId, parts } = req.body;
++
++  try {
++    const command = new CompleteMultipartUploadCommand({
++      Bucket: process.env.S3_BUCKET,
++      Key: key,
++      UploadId: uploadId,
++      MultipartUpload: { Parts: parts },
++    });
++    const response = await getS3Client().send(command);
++
++    const safeExt = normalizeExtension(key || '');
++    if (!safeExt) {
++      await getS3Client().send(new DeleteObjectCommand({ Bucket: process.env.S3_BUCKET, Key: key }));
++      return res.status(400).json({ message: 'Unsupported file type.' });
++    }
++    const expectedMime = ALLOWED_EXT_TO_MIME[safeExt];
++
++    const now = new Date();
++    const year = String(now.getFullYear());
++    const month = String(now.getMonth() + 1).padStart(2, '0');
++    const day = String(now.getDate()).padStart(2, '0');
++    const relativeDir = [year, month, day].join('/');
++    const uploadRoot = path.resolve(process.env.UPLOAD_DIRECTORY || '/uploads');
++    const finalDir = path.join(uploadRoot, relativeDir);
++    mkdirSync(finalDir, { recursive: true });
++
++    const finalName = generateRandomString() + safeExt;
++    const finalPath = path.join(finalDir, finalName);
++    const tempPath = finalPath + '.partial-' + generateRandomString();
++
++    try {
++      const object = await getS3Client().send(
++        new GetObjectCommand({ Bucket: process.env.S3_BUCKET, Key: key })
++      );
++      if (!object.Body) {
++        throw new Error('S3 object body is empty.');
++      }
++      // @ts-ignore AWS SDK Node body is a readable stream
++      await pipeline(object.Body as any, createWriteStream(tempPath, { flags: 'wx', mode: 0o644 }));
++
++      const prefix = Buffer.alloc(4100);
++      const fd = openSync(tempPath, 'r');
++      const bytesRead = readSync(fd, prefix, 0, prefix.length, 0);
++      closeSync(fd);
++      const detected = await fileTypeFromBuffer(prefix.subarray(0, bytesRead));
++
++      if (!detected || detected.mime !== expectedMime) {
++        rmSync(tempPath, { force: true });
++        await getS3Client().send(new DeleteObjectCommand({ Bucket: process.env.S3_BUCKET, Key: key }));
++        return res.status(400).json({ message: 'File contents do not match declared type.' });
++      }
++
++      renameSync(tempPath, finalPath);
++    } catch (err) {
++      rmSync(tempPath, { force: true });
++      throw err;
++    }
++
++    try {
++      await getS3Client().send(new DeleteObjectCommand({ Bucket: process.env.S3_BUCKET, Key: key }));
++    } catch (cleanupError) {
++      console.error('Garage staging cleanup failed; local media is safe:', cleanupError);
++    }
++
++    response.Location = process.env.FRONTEND_URL + '/uploads/' + relativeDir + '/' + finalName;
++    return response;
++  } catch (err) {
++    console.log('Error', err);
++    return res.status(500).json({ source: { status: 500 } });
++  }
++}
++
++export async function abortMultipartUpload(req: Request, res: Response) {
++  const { key, uploadId } = req.body;
++
++  try {
++    const command = new AbortMultipartUploadCommand({
++      Bucket: process.env.S3_BUCKET,
++      Key: key,
++      UploadId: uploadId,
++    });
++    const response = await getS3Client().send(command);
++    return res.status(200).json(response);
++  } catch (err) {
++    console.log('Error', err);
++    return res.status(500).json(err);
++  }
++}
++
++export async function signPart(req: Request, res: Response) {
++  const { key, uploadId } = req.body;
++  const partNumber = parseInt(req.body.partNumber);
++
++  const command = new UploadPartCommand({
++    Bucket: process.env.S3_BUCKET,
++    Key: key,
++    PartNumber: partNumber,
++    UploadId: uploadId,
++  });
++  const url = await getSignedUrl(getS3Client(), command, { expiresIn: 3600 });
++
++  return res.status(200).json({ url });
++}
+diff --git a/libraries/nestjs-libraries/src/upload/upload.factory.ts b/libraries/nestjs-libraries/src/upload/upload.factory.ts
+index d3c3fed..27d32f4 100644
+--- a/libraries/nestjs-libraries/src/upload/upload.factory.ts
++++ b/libraries/nestjs-libraries/src/upload/upload.factory.ts
+@@ -1,14 +1,15 @@
+ import { CloudflareStorage } from './cloudflare.storage';
+ import { IUploadProvider } from './upload.interface';
+ import { LocalStorage } from './local.storage';
+-import { IMediaProcessor } from './media.processor.interface';
+-import { RunPodMediaProcessor } from './runpod.media.processor';
++import { IMediaProcessor } from ./media.processor.interface;
++import { RunPodMediaProcessor } from ./runpod.media.processor;
+ import {
+   ClipJob,
+   ClipResult,
+   IngestJob,
+   IngestResult,
+-} from './clipping.processor.interface';
++} from ./clipping.processor.interface;
++import { S3Storage } from ./s3.storage;
+ 
+ export class UploadFactory {
+   static createStorage(): IUploadProvider {
+@@ -26,6 +27,15 @@ export class UploadFactory {
+           process.env.CLOUDFLARE_BUCKETNAME!,
+           process.env.CLOUDFLARE_BUCKET_URL!
+         );
++      case 's3':
++        return new S3Storage(
++          process.env.S3_ACCESS_KEY!,
++          process.env.S3_SECRET_KEY!,
++          process.env.S3_REGION!,
++          process.env.S3_BUCKET!,
++          process.env.S3_BUCKET_URL!,
++          process.env.S3_ENDPOINT
++        );
+       default:
+         throw new Error(`Invalid storage type ${storageProvider}`);
+     }
+diff --git a/libraries/react-shared-libraries/src/helpers/uppy.upload.ts b/libraries/react-shared-libraries/src/helpers/uppy.upload.ts
+index acece4e..e79868a 100644
+--- a/libraries/react-shared-libraries/src/helpers/uppy.upload.ts
++++ b/libraries/react-shared-libraries/src/helpers/uppy.upload.ts
+@@ -144,6 +144,7 @@ export const getUppyUploadPlugin = (
+           },
+         },
+       };
++    case 's3':
+     case 'cloudflare':
+       return {
+         plugin: AwsS3Multipart,
+diff --git a/libraries/react-shared-libraries/src/helpers/use.media.directory.ts b/libraries/react-shared-libraries/src/helpers/use.media.directory.ts
+index fdddb62..f8b3a86 100644
+--- a/libraries/react-shared-libraries/src/helpers/use.media.directory.ts
++++ b/libraries/react-shared-libraries/src/helpers/use.media.directory.ts
+@@ -1,8 +1,40 @@
+ import { useCallback } from 'react';
++import { useVariables } from '@gitroom/react/helpers/variable.context';
++
++const isKnownStorageHost = (hostname: string, storageHostname: string) => {
++  return (
++    hostname === storageHostname ||
++    hostname.endsWith('.r2.cloudflarestorage.com') ||
++    /(^|\.)s3([.-][a-z0-9-]+)?\.amazonaws\.com$/.test(hostname)
++  );
++};
++
+ export const useMediaDirectory = () => {
++  const { storageProvider, cloudflareUrl } = useVariables();
++
+   const set = useCallback((path: string) => {
+-    return path;
+-  }, []);
++    if (
++      !path ||
++      (storageProvider !== 'cloudflare' && storageProvider !== 's3') ||
++      !cloudflareUrl
++    ) {
++      return path;
++    }
++
++    try {
++      const currentUrl = new URL(path);
++      const storageUrl = new URL(cloudflareUrl);
++      if (!isKnownStorageHost(currentUrl.hostname, storageUrl.hostname)) {
++        return path;
++      }
++      currentUrl.protocol = storageUrl.protocol;
++      currentUrl.host = storageUrl.host;
++      return currentUrl.toString();
++    } catch {
++      return path;
++    }
++  }, [cloudflareUrl, storageProvider]);
++
+   return {
+     set,
+   };
+diff --git a/libraries/react-shared-libraries/src/helpers/variable.context.tsx b/libraries/react-shared-libraries/src/helpers/variable.context.tsx
+index 4bf3870..47fac58 100644
+--- a/libraries/react-shared-libraries/src/helpers/variable.context.tsx
++++ b/libraries/react-shared-libraries/src/helpers/variable.context.tsx
+@@ -14,7 +14,7 @@ interface VariableContextInterface {
+   mainUrl: string;
+   frontEndUrl: string;
+   plontoKey: string;
+-  storageProvider: 'local' | 'cloudflare';
++  storageProvider: 'local' | 'cloudflare' | 's3';
+   backendUrl: string;
+   environment: string;
+   discordUrl: string;
+diff --git a/libraries/react-shared-libraries/tsconfig.json b/libraries/react-shared-libraries/tsconfig.json
+index ef0c1df..9f17c5f 100644
+--- a/libraries/react-shared-libraries/tsconfig.json
++++ b/libraries/react-shared-libraries/tsconfig.json
+@@ -3,6 +3,7 @@
+   "compilerOptions": {
+     "forceConsistentCasingInFileNames": true,
+     "esModuleInterop": true,
++    "jsx": "react-jsx",
+     "allowSyntheticDefaultImports": true,
+     "strict": true,
+     "noImplicitOverride": true,
+-- 
+2.53.0
+
+From ccea53af1653542b5299956a9d0945ba7696943c Mon Sep 17 00:00:00 2001
+From: cloud9-postiz-builder <root@cloud9.local>
+Date: Thu, 24 Sep 2026 01:43:06 +0200
+Subject: [PATCH] fix: adapt S3 patch cleanly to Postiz 2.24
+
+---
+ apps/backend/src/api/routes/media.controller.ts         | 4 ++--
+ libraries/nestjs-libraries/src/upload/upload.factory.ts | 8 ++++----
+ 2 files changed, 6 insertions(+), 6 deletions(-)
+
+diff --git a/apps/backend/src/api/routes/media.controller.ts b/apps/backend/src/api/routes/media.controller.ts
+index e099934..ba0daac 100644
+--- a/apps/backend/src/api/routes/media.controller.ts
++++ b/apps/backend/src/api/routes/media.controller.ts
+@@ -158,8 +158,8 @@ export class MediaController {
+     @Res() res: Response,
+     @Param('endpoint') endpoint: string
+   ) {
+-    const storageProvider = process.env.STORAGE_PROVIDER || local;
+-    const upload = await (storageProvider === s3
++    const storageProvider = process.env.STORAGE_PROVIDER || 'local';
++    const upload = await (storageProvider === 's3'
+       ? handleS3Upload
+       : handleR2Upload)(endpoint, req, res);
+     // a rejected or failed completion has already answered with its own status
+diff --git a/libraries/nestjs-libraries/src/upload/upload.factory.ts b/libraries/nestjs-libraries/src/upload/upload.factory.ts
+index 27d32f4..9027efe 100644
+--- a/libraries/nestjs-libraries/src/upload/upload.factory.ts
++++ b/libraries/nestjs-libraries/src/upload/upload.factory.ts
+@@ -1,15 +1,15 @@
+ import { CloudflareStorage } from './cloudflare.storage';
+ import { IUploadProvider } from './upload.interface';
+ import { LocalStorage } from './local.storage';
+-import { IMediaProcessor } from ./media.processor.interface;
+-import { RunPodMediaProcessor } from ./runpod.media.processor;
++import { IMediaProcessor } from './media.processor.interface';
++import { RunPodMediaProcessor } from './runpod.media.processor';
+ import {
+   ClipJob,
+   ClipResult,
+   IngestJob,
+   IngestResult,
+-} from ./clipping.processor.interface;
+-import { S3Storage } from ./s3.storage;
++} from './clipping.processor.interface';
++import { S3Storage } from './s3.storage';
+ 
+ export class UploadFactory {
+   static createStorage(): IUploadProvider {
+-- 
+2.53.0
+
+From 8df54affda2efa4af52cd90248b01176ae346db1 Mon Sep 17 00:00:00 2001
+From: cloud9-postiz-builder <root@cloud9.local>
+Date: Thu, 24 Sep 2026 01:48:36 +0200
+Subject: [PATCH] fix: support Postiz 2.24 streaming upload interface
+
+---
+ libraries/nestjs-libraries/src/upload/s3.storage.ts | 11 ++++++++++-
+ 1 file changed, 10 insertions(+), 1 deletion(-)
+
+diff --git a/libraries/nestjs-libraries/src/upload/s3.storage.ts b/libraries/nestjs-libraries/src/upload/s3.storage.ts
+index 2148f9e..01213f7 100644
+--- a/libraries/nestjs-libraries/src/upload/s3.storage.ts
++++ b/libraries/nestjs-libraries/src/upload/s3.storage.ts
+@@ -1,7 +1,8 @@
+ import 'multer';
+ import { unlink } from 'fs';
+ import path from 'path';
+-import { IUploadProvider } from './upload.interface';
++import { Readable } from 'stream';
++import { IUploadProvider, UploadedStream } from './upload.interface';
+ import { LocalStorage } from './local.storage';
+ 
+ /**
+@@ -33,6 +34,14 @@ class S3Storage implements IUploadProvider {
+     return this.local.uploadFile(file);
+   }
+ 
++  async uploadStream(
++    stream: Readable,
++    mimetype: string,
++    ext: string
++  ): Promise<UploadedStream> {
++    return this.local.uploadStream(stream, mimetype, ext);
++  }
++
+   async removeFile(filePath: string): Promise<void> {
+     const prefix = `${process.env.FRONTEND_URL}/uploads/`;
+     const uploadRoot = path.resolve(process.env.UPLOAD_DIRECTORY!);
+-- 
+2.53.0
+
+From e86dab5989a0bdd2bdce29e230d085ef13c07fe1 Mon Sep 17 00:00:00 2001
+From: cloud9-postiz-builder <root@cloud9.local>
+Date: Sat, 26 Sep 2026 14:30:34 +0200
+Subject: [PATCH] fix: route local Postiz uploads around S3
+
+---
+ .env.example                                 |  1 +
+ apps/frontend/src/app/(app)/layout.tsx       |  8 +-
+ apps/frontend/src/app/(extension)/layout.tsx |  8 +-
+ apps/frontend/src/app/(provider)/layout.tsx  |  8 +-
+ apps/frontend/src/helpers/upload.provider.ts | 77 ++++++++++++++++++++
+ 5 files changed, 90 insertions(+), 12 deletions(-)
+ create mode 100644 apps/frontend/src/helpers/upload.provider.ts
+
+diff --git a/.env.example b/.env.example
+index c7f3947..4948f41 100644
+--- a/.env.example
++++ b/.env.example
+@@ -40,6 +40,7 @@ CLOUDFLARE_REGION="auto"
+ # S3_REGION="us-east-1"
+ # S3_BUCKET_URL="https://your-bucket.s3.amazonaws.com"
+ # S3_ENDPOINT=
++# POSTIZ_LOCAL_UPLOAD_CIDRS="127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,100.64.0.0/10"
+ 
+ # === Common optional Settings
+ 
+diff --git a/apps/frontend/src/app/(app)/layout.tsx b/apps/frontend/src/app/(app)/layout.tsx
+index 5014612..e0f106e 100644
+--- a/apps/frontend/src/app/(app)/layout.tsx
++++ b/apps/frontend/src/app/(app)/layout.tsx
+@@ -10,6 +10,7 @@ import { Plus_Jakarta_Sans } from 'next/font/google';
+ import PlausibleProvider from 'next-plausible';
+ import clsx from 'clsx';
+ import { VariableContextComponent } from '@gitroom/react/helpers/variable.context';
++import { getRequestStorageProvider } from '@gitroom/frontend/helpers/upload.provider';
+ import { Fragment } from 'react';
+ import { PHProvider } from '@gitroom/react/helpers/posthog';
+ import UtmSaver from '@gitroom/helpers/utils/utm.saver';
+@@ -32,6 +33,7 @@ const jakartaSans = Plus_Jakarta_Sans({
+ });
+ 
+ export default async function AppLayout({ children }: { children: ReactNode }) {
++  const storageProvider = await getRequestStorageProvider();
+   const cookieStore = await cookies();
+   const language = cookieStore.get(cookieName)?.value || fallbackLng;
+   const Plausible = !!process.env.STRIPE_PUBLISHABLE_KEY
+@@ -55,9 +57,7 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
+         className={clsx(jakartaSans.className, 'dark text-primary !bg-primary')}
+       >
+         <VariableContextComponent
+-          storageProvider={
+-            process.env.STORAGE_PROVIDER! as 'local' | 'cloudflare' | 's3'
+-          }
++          storageProvider={storageProvider}
+           environment={process.env.NODE_ENV!}
+           backendUrl={process.env.NEXT_PUBLIC_BACKEND_URL!}
+           plontoKey={process.env.NEXT_PUBLIC_POLOTNO!}
+@@ -72,7 +72,7 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
+           oauthDisplayName={process.env.NEXT_PUBLIC_POSTIZ_OAUTH_DISPLAY_NAME!}
+           uploadDirectory={process.env.NEXT_PUBLIC_UPLOAD_STATIC_DIRECTORY!}
+           cloudflareUrl={
+-            process.env.STORAGE_PROVIDER === 's3'
++            storageProvider === 's3'
+               ? process.env.S3_BUCKET_URL || ''
+               : process.env.STORAGE_PROVIDER === 'cloudflare'
+               ? process.env.CLOUDFLARE_BUCKET_URL || ''
+diff --git a/apps/frontend/src/app/(extension)/layout.tsx b/apps/frontend/src/app/(extension)/layout.tsx
+index 0433a5a..2b89743 100644
+--- a/apps/frontend/src/app/(extension)/layout.tsx
++++ b/apps/frontend/src/app/(extension)/layout.tsx
+@@ -7,6 +7,7 @@ import { ReactNode } from 'react';
+ import { Plus_Jakarta_Sans } from 'next/font/google';
+ import clsx from 'clsx';
+ import { VariableContextComponent } from '@gitroom/react/helpers/variable.context';
++import { getRequestStorageProvider } from '@gitroom/frontend/helpers/upload.provider';
+ import UtmSaver from '@gitroom/helpers/utils/utm.saver';
+ 
+ const jakartaSans = Plus_Jakarta_Sans({
+@@ -16,6 +17,7 @@ const jakartaSans = Plus_Jakarta_Sans({
+ });
+ 
+ export default async function AppLayout({ children }: { children: ReactNode }) {
++  const storageProvider = await getRequestStorageProvider();
+   return (
+     <html>
+       <head>
+@@ -26,9 +28,7 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
+       >
+         <VariableContextComponent
+           language="en"
+-          storageProvider={
+-            process.env.STORAGE_PROVIDER! as 'local' | 'cloudflare' | 's3'
+-          }
++          storageProvider={storageProvider}
+           stripeClient=""
+           environment={process.env.NODE_ENV!}
+           backendUrl={process.env.NEXT_PUBLIC_BACKEND_URL!}
+@@ -42,7 +42,7 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
+           oauthDisplayName={process.env.NEXT_PUBLIC_POSTIZ_OAUTH_DISPLAY_NAME!}
+           uploadDirectory={process.env.NEXT_PUBLIC_UPLOAD_STATIC_DIRECTORY!}
+           cloudflareUrl={
+-            process.env.STORAGE_PROVIDER === 's3'
++            storageProvider === 's3'
+               ? process.env.S3_BUCKET_URL || ''
+               : process.env.STORAGE_PROVIDER === 'cloudflare'
+               ? process.env.CLOUDFLARE_BUCKET_URL || ''
+diff --git a/apps/frontend/src/app/(provider)/layout.tsx b/apps/frontend/src/app/(provider)/layout.tsx
+index b64f614..f443912 100644
+--- a/apps/frontend/src/app/(provider)/layout.tsx
++++ b/apps/frontend/src/app/(provider)/layout.tsx
+@@ -9,6 +9,7 @@ import { ReactNode } from 'react';
+ import { Plus_Jakarta_Sans } from 'next/font/google';
+ import clsx from 'clsx';
+ import { VariableContextComponent } from '@gitroom/react/helpers/variable.context';
++import { getRequestStorageProvider } from '@gitroom/frontend/helpers/upload.provider';
+ import UtmSaver from '@gitroom/helpers/utils/utm.saver';
+ 
+ const jakartaSans = Plus_Jakarta_Sans({
+@@ -18,6 +19,7 @@ const jakartaSans = Plus_Jakarta_Sans({
+ });
+ 
+ export default async function AppLayout({ children }: { children: ReactNode }) {
++  const storageProvider = await getRequestStorageProvider();
+   return (
+     <html>
+       <head>
+@@ -28,9 +30,7 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
+       >
+         <VariableContextComponent
+           language="en"
+-          storageProvider={
+-            process.env.STORAGE_PROVIDER! as 'local' | 'cloudflare' | 's3'
+-          }
++          storageProvider={storageProvider}
+           stripeClient=""
+           environment={process.env.NODE_ENV!}
+           backendUrl={process.env.NEXT_PUBLIC_BACKEND_URL!}
+@@ -44,7 +44,7 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
+           oauthDisplayName={process.env.NEXT_PUBLIC_POSTIZ_OAUTH_DISPLAY_NAME!}
+           uploadDirectory={process.env.NEXT_PUBLIC_UPLOAD_STATIC_DIRECTORY!}
+           cloudflareUrl={
+-            process.env.STORAGE_PROVIDER === 's3'
++            storageProvider === 's3'
+               ? process.env.S3_BUCKET_URL || ''
+               : process.env.STORAGE_PROVIDER === 'cloudflare'
+               ? process.env.CLOUDFLARE_BUCKET_URL || ''
+diff --git a/apps/frontend/src/helpers/upload.provider.ts b/apps/frontend/src/helpers/upload.provider.ts
+new file mode 100644
+index 0000000..b7249a1
+--- /dev/null
++++ b/apps/frontend/src/helpers/upload.provider.ts
+@@ -0,0 +1,77 @@
++import { headers } from 'next/headers';
++
++export type RequestStorageProvider = 'local' | 'cloudflare' | 's3';
++
++const DEFAULT_LOCAL_CIDRS = [
++  '127.0.0.0/8',
++  '10.0.0.0/8',
++  '172.16.0.0/12',
++  '192.168.0.0/16',
++  '100.64.0.0/10',
++];
++
++function normalizeIp(value?: string | null) {
++  if (!value) return '';
++  let ip = value.trim().replace(/^"|"$/g, '');
++  if (ip.startsWith('::ffff:')) ip = ip.slice(7);
++  if (/^\d+\.\d+\.\d+\.\d+:\d+$/.test(ip)) {
++    ip = ip.replace(/:\d+$/, '');
++  }
++  return ip;
++}
++
++function ipv4ToInt(ip: string): number | null {
++  const parts = ip.split('.');
++  if (parts.length !== 4) return null;
++  const nums = parts.map(Number);
++  if (nums.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return null;
++  return (((nums[0] * 256 + nums[1]) * 256 + nums[2]) * 256 + nums[3]) >>> 0;
++}
++
++function inIpv4Cidr(ip: string, cidr: string) {
++  const [network, prefixRaw] = cidr.split('/');
++  const prefix = Number(prefixRaw);
++  if (!Number.isInteger(prefix) || prefix < 0 || prefix > 32) return false;
++  const ipInt = ipv4ToInt(ip);
++  const networkInt = ipv4ToInt(network);
++  if (ipInt === null || networkInt === null) return false;
++  const mask = prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0;
++  return ((ipInt & mask) >>> 0) === ((networkInt & mask) >>> 0);
++}
++
++function isLocalIp(ip: string) {
++  if (!ip) return false;
++  if (ip === '::1' || ip.startsWith('fd7a:115c:a1e0:')) return true;
++
++  const cidrs = (process.env.POSTIZ_LOCAL_UPLOAD_CIDRS || '')
++    .split(',')
++    .map((p) => p.trim())
++    .filter(Boolean);
++  const effectiveCidrs = cidrs.length ? cidrs : DEFAULT_LOCAL_CIDRS;
++  return effectiveCidrs.some((cidr) => inIpv4Cidr(ip, cidr));
++}
++
++export async function getRequestStorageProvider(): Promise<RequestStorageProvider> {
++  const configured = (process.env.STORAGE_PROVIDER || 'local') as RequestStorageProvider;
++  if (configured !== 's3') return configured;
++
++  const requestHeaders = await headers();
++
++  // Cloudflare Tunnel preserves the real external address here. Prefer it so
++  // an Internet request cannot be mistaken for a LAN request just because the
++  // last reverse-proxy hop is private.
++  const cloudflareIp = normalizeIp(requestHeaders.get('cf-connecting-ip'));
++  if (cloudflareIp) {
++    return isLocalIp(cloudflareIp) ? 'local' : 's3';
++  }
++
++  // nginx appends its peer to X-Forwarded-For, so the first hop is the
++  // original client when requests come through Traefik/Pangolin.
++  const forwarded = requestHeaders.get('x-forwarded-for');
++  const clientIp = normalizeIp(
++    forwarded?.split(',')[0] || requestHeaders.get('x-real-ip')
++  );
++
++  // Unknown origin is deliberately conservative: keep the remote-safe S3 path.
++  return clientIp && isLocalIp(clientIp) ? 'local' : 's3';
++}
+-- 
+2.53.0
+

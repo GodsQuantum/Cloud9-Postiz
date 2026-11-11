@@ -1,0 +1,56 @@
+From 3d5ea969f78cb4621eea28b9ea192afa3e8635a1 Mon Sep 17 00:00:00 2001
+From: cloud9-postiz-builder <root@cloud9.local>
+Date: Fri, 2 Oct 2026 01:50:31 +0200
+Subject: [PATCH] feat(instagram): support location_id for single-video reels
+
+---
+ .../src/dtos/posts/providers-settings/instagram.dto.ts |  4 ++++
+ .../src/integrations/social/instagram.provider.ts      | 10 +++++++++-
+ 2 files changed, 13 insertions(+), 1 deletion(-)
+
+diff --git a/libraries/nestjs-libraries/src/dtos/posts/providers-settings/instagram.dto.ts b/libraries/nestjs-libraries/src/dtos/posts/providers-settings/instagram.dto.ts
+index 38e2500..64b9be5 100644
+--- a/libraries/nestjs-libraries/src/dtos/posts/providers-settings/instagram.dto.ts
++++ b/libraries/nestjs-libraries/src/dtos/posts/providers-settings/instagram.dto.ts
+@@ -66,6 +66,10 @@ export class InstagramDto {
+   @IsOptional()
+   collaborators: Collaborators[];
+ 
++  @IsOptional()
++  @IsString()
++  location_id?: string;
++
+   @Type(() => InstagramAudio)
+   @ValidateNested()
+   @IsOptional()
+diff --git a/libraries/nestjs-libraries/src/integrations/social/instagram.provider.ts b/libraries/nestjs-libraries/src/integrations/social/instagram.provider.ts
+index b9eb4a2..1555040 100644
+--- a/libraries/nestjs-libraries/src/integrations/social/instagram.provider.ts
++++ b/libraries/nestjs-libraries/src/integrations/social/instagram.provider.ts
+@@ -721,6 +721,14 @@ export class InstagramProvider
+         const itemCollaborators =
+           firstPost?.media?.length === 1 ? collaborators : ``;
+ 
++        const itemLocation =
++          firstPost?.settings?.location_id &&
++          !isStory &&
++          firstPost?.media?.length === 1 &&
++          hasExtension(m.path, 'mp4')
++            ? `&location_id=${encodeURIComponent(firstPost.settings.location_id)}`
++            : ``;
++
+         // audio_configuration is only supported for Reels (single video, not a story)
+         // and only with Facebook Login (not Instagram Login / graph.instagram.com)
+         const audioConfiguration =
+@@ -746,7 +754,7 @@ export class InstagramProvider
+ 
+         const { id: photoId } = await (
+           await this.fetch(
+-            `https://${type}/${META_GRAPH_API_VERSION}/${id}/media?${mediaType}${isCarousel}${itemCollaborators}${trialParams}${audioConfiguration}&access_token=${accessToken}${caption}`,
++            `https://${type}/${META_GRAPH_API_VERSION}/${id}/media?${mediaType}${isCarousel}${itemCollaborators}${trialParams}${itemLocation}${audioConfiguration}&access_token=${accessToken}${caption}`,
+             {
+               method: 'POST',
+             }
+-- 
+2.53.0
+

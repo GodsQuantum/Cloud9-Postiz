@@ -1,0 +1,956 @@
+From 2cc16eaab0d46a420769f4ef1cc1a980fd59c2a7 Mon Sep 17 00:00:00 2001
+From: cloud9-postiz-builder <root@cloud9.local>
+Date: Mon, 28 Sep 2026 21:20:16 +0200
+Subject: [PATCH] fix: make TikTok Direct Post audit compliant
+
+---
+ apps/frontend/src/app/(public)/layout.tsx     |  34 ++
+ .../src/app/(public)/privacy/page.tsx         |  81 ++++
+ .../frontend/src/app/(public)/review/page.tsx |  77 ++++
+ apps/frontend/src/app/(public)/terms/page.tsx |  66 ++++
+ .../frontend/src/components/auth/register.tsx |   4 +-
+ .../helpers/use.custom.provider.function.ts   |   5 +-
+ .../providers/tiktok/tiktok.provider.tsx      | 347 ++++++++++++++----
+ apps/frontend/src/proxy.ts                    |   7 +-
+ .../posts/providers-settings/tiktok.dto.ts    |  13 +-
+ .../integrations/social/tiktok.provider.ts    |  47 ++-
+ 10 files changed, 582 insertions(+), 99 deletions(-)
+ create mode 100644 apps/frontend/src/app/(public)/layout.tsx
+ create mode 100644 apps/frontend/src/app/(public)/privacy/page.tsx
+ create mode 100644 apps/frontend/src/app/(public)/review/page.tsx
+ create mode 100644 apps/frontend/src/app/(public)/terms/page.tsx
+
+diff --git a/apps/frontend/src/app/(public)/layout.tsx b/apps/frontend/src/app/(public)/layout.tsx
+new file mode 100644
+index 0000000..008e73b
+--- /dev/null
++++ b/apps/frontend/src/app/(public)/layout.tsx
+@@ -0,0 +1,34 @@
++import Link from 'next/link';
++import type { ReactNode } from 'react';
++
++export default function PublicLayout({ children }: { children: ReactNode }) {
++  return (
++    <main className="min-h-screen bg-[#0b0b0d] text-white">
++      <div className="mx-auto max-w-4xl px-6 py-10">
++        <header className="mb-12 flex flex-wrap items-center justify-between gap-4 border-b border-white/10 pb-6">
++          <Link href="/review" className="text-xl font-semibold">
++            Cloud9 Social
++          </Link>
++          <nav className="flex gap-5 text-sm text-white/70">
++            <Link href="/review" className="hover:text-white">
++              Product
++            </Link>
++            <Link href="/privacy" className="hover:text-white">
++              Privacy
++            </Link>
++            <Link href="/terms" className="hover:text-white">
++              Terms
++            </Link>
++            <Link href="/auth" className="hover:text-white">
++              Sign in
++            </Link>
++          </nav>
++        </header>
++        {children}
++        <footer className="mt-14 border-t border-white/10 pt-6 text-sm text-white/55">
++          © 2026 Cloud9 Social · Operator-defined jurisdiction
++        </footer>
++      </div>
++    </main>
++  );
++}
+diff --git a/apps/frontend/src/app/(public)/privacy/page.tsx b/apps/frontend/src/app/(public)/privacy/page.tsx
+new file mode 100644
+index 0000000..e5dd988
+--- /dev/null
++++ b/apps/frontend/src/app/(public)/privacy/page.tsx
+@@ -0,0 +1,81 @@
++export const metadata = { title: 'Privacy Policy — Cloud9 Social' };
++
++export default function PrivacyPage() {
++  return (
++    <article className="space-y-7 text-[15px] leading-7 text-white/80">
++      <h1 className="text-4xl font-semibold text-white">Privacy Policy</h1>
++      <p>
++        Effective September 28, 2026. This policy describes the data handled by
++        Cloud9 Social when users connect social-media accounts and
++        publish content.
++      </p>
++      <section>
++        <h2 className="text-xl font-semibold text-white">Data we process</h2>
++        <p>
++          We process account identifiers, profile information returned by
++          connected platforms, OAuth credentials required to maintain authorized
++          connections, user-created posts and media, scheduling information, and
++          technical logs needed to operate and secure the service.
++        </p>
++      </section>
++      <section>
++        <h2 className="text-xl font-semibold text-white">TikTok data</h2>
++        <p>
++          For TikTok, we use only data and permissions authorized by the user
++          and required for account connection and Content Posting API features.
++          This includes creator information and posting capabilities used to
++          show the correct privacy, interaction and duration options before a
++          post is submitted.
++        </p>
++      </section>
++      <section>
++        <h2 className="text-xl font-semibold text-white">How data is used</h2>
++        <p>
++          Data is used to authenticate the user, display connected accounts,
++          prepare and preview user-selected content, schedule or publish that
++          content, report publishing status, and troubleshoot service errors. We
++          do not sell TikTok user data or use it for unrelated advertising.
++        </p>
++      </section>
++      <section>
++        <h2 className="text-xl font-semibold text-white">
++          Storage and security
++        </h2>
++        <p>
++          Connection data and publishing records are stored on infrastructure
++          controlled by the service operator and are protected by access
++          controls appropriate to the service. Access is limited to what is
++          needed to operate, secure and support the application.
++        </p>
++      </section>
++      <section>
++        <h2 className="text-xl font-semibold text-white">
++          Control and deletion
++        </h2>
++        <p>
++          Users can disconnect a social account from the service and can also
++          revoke TikTok authorization from their TikTok account settings. Users
++          may request deletion of account and associated service data through
++          the operator contact associated with this service.
++        </p>
++      </section>
++      <section>
++        <h2 className="text-xl font-semibold text-white">Third parties</h2>
++        <p>
++          Publishing necessarily sends the content and settings selected by the
++          user to the destination platform, including TikTok. Those platforms
++          process the submitted information under their own terms and privacy
++          policies.
++        </p>
++      </section>
++      <section>
++        <h2 className="text-xl font-semibold text-white">Changes</h2>
++        <p>
++          This policy may be updated when service functionality or legal
++          requirements change. The effective date above identifies the current
++          version.
++        </p>
++      </section>
++    </article>
++  );
++}
+diff --git a/apps/frontend/src/app/(public)/review/page.tsx b/apps/frontend/src/app/(public)/review/page.tsx
+new file mode 100644
+index 0000000..d39a1ce
+--- /dev/null
++++ b/apps/frontend/src/app/(public)/review/page.tsx
+@@ -0,0 +1,77 @@
++import Link from 'next/link';
++
++export const metadata = {
++  title: 'Cloud9 Social — Publishing platform',
++};
++
++export default function ReviewPage() {
++  return (
++    <article className="space-y-8 text-[15px] leading-7 text-white/80">
++      <section>
++        <p className="mb-3 text-sm font-medium uppercase tracking-[0.18em] text-white/45">
++          Social publishing
++        </p>
++        <h1 className="text-4xl font-semibold leading-tight text-white">
++          Create, review, schedule and publish your own social content.
++        </h1>
++        <p className="mt-5 max-w-3xl">
++          Cloud9 Social is a web-based publishing service for registered
++          creators and teams. Users connect their own social accounts and choose
++          the content, destination, privacy and publishing options for each
++          post.
++        </p>
++      </section>
++      <section className="rounded-2xl border border-white/10 p-6">
++        <h2 className="mb-3 text-xl font-semibold text-white">
++          TikTok integration
++        </h2>
++        <p>
++          The TikTok integration uses TikTok Login Kit and the Content Posting
++          API. It reads the connected creator&apos;s current posting
++          capabilities, presents TikTok&apos;s available privacy and interaction
++          choices, previews the selected content, and publishes only after the
++          user explicitly chooses to post.
++        </p>
++        <p className="mt-3">
++          The service never posts unrelated or promotional content on a
++          user&apos;s behalf. Users control the media, caption, disclosure
++          settings, privacy level and whether a post is sent directly to TikTok
++          or uploaded for completion inside TikTok.
++        </p>
++      </section>
++      <section className="grid gap-4 sm:grid-cols-3">
++        <div className="rounded-xl border border-white/10 p-5">
++          <strong className="text-white">Connect</strong>
++          <p className="mt-2">
++            Authorize your own TikTok account through TikTok OAuth.
++          </p>
++        </div>
++        <div className="rounded-xl border border-white/10 p-5">
++          <strong className="text-white">Review</strong>
++          <p className="mt-2">
++            Choose media, caption, privacy, interactions and disclosures.
++          </p>
++        </div>
++        <div className="rounded-xl border border-white/10 p-5">
++          <strong className="text-white">Publish</strong>
++          <p className="mt-2">
++            Explicitly submit the selected post or schedule it for your account.
++          </p>
++        </div>
++      </section>
++      <p>
++        <Link href="/auth" className="underline">
++          Register or sign in
++        </Link>{' '}
++        ·{' '}
++        <Link href="/privacy" className="underline">
++          Privacy Policy
++        </Link>{' '}
++        ·{' '}
++        <Link href="/terms" className="underline">
++          Terms of Service
++        </Link>
++      </p>
++    </article>
++  );
++}
+diff --git a/apps/frontend/src/app/(public)/terms/page.tsx b/apps/frontend/src/app/(public)/terms/page.tsx
+new file mode 100644
+index 0000000..eb0ea65
+--- /dev/null
++++ b/apps/frontend/src/app/(public)/terms/page.tsx
+@@ -0,0 +1,66 @@
++export const metadata = { title: 'Terms of Service — Cloud9 Social' };
++
++export default function TermsPage() {
++  return (
++    <article className="space-y-7 text-[15px] leading-7 text-white/80">
++      <h1 className="text-4xl font-semibold text-white">Terms of Service</h1>
++      <p>
++        Effective September 28, 2026. These terms govern use of the publishing creator
++        Social, a web-based social-media publishing service.
++      </p>
++      <section>
++        <h2 className="text-xl font-semibold text-white">Authorized use</h2>
++        <p>
++          Users may connect only accounts they are authorized to control and may
++          publish only content they have the right to distribute. Users remain
++          responsible for captions, media, disclosures, privacy settings and
++          other publishing choices.
++        </p>
++      </section>
++      <section>
++        <h2 className="text-xl font-semibold text-white">TikTok publishing</h2>
++        <p>
++          TikTok accounts are connected through TikTok authorization. Before a
++          Direct Post, the service presents creator-specific posting options
++          supplied by TikTok. A post is submitted only after the user selects
++          the relevant settings and explicitly initiates or schedules
++          publication.
++        </p>
++      </section>
++      <section>
++        <h2 className="text-xl font-semibold text-white">Platform rules</h2>
++        <p>
++          Users must follow the destination platform&apos;s terms, community
++          rules, intellectual-property requirements and commercial-content
++          requirements. The service does not authorize conduct prohibited by
++          TikTok or any other connected platform.
++        </p>
++      </section>
++      <section>
++        <h2 className="text-xl font-semibold text-white">Availability</h2>
++        <p>
++          Publishing depends on third-party APIs and may be delayed, rejected or
++          unavailable when a platform changes its service, permissions or
++          limits. The application reports platform errors when available but
++          cannot guarantee delivery by third parties.
++        </p>
++      </section>
++      <section>
++        <h2 className="text-xl font-semibold text-white">Account control</h2>
++        <p>
++          Users may disconnect integrations and stop using the service at any
++          time. TikTok authorization may also be revoked directly from TikTok
++          account settings.
++        </p>
++      </section>
++      <section>
++        <h2 className="text-xl font-semibold text-white">Changes</h2>
++        <p>
++          These terms may be updated when the service or applicable requirements
++          change. Continued use after an update is subject to the current
++          version shown here.
++        </p>
++      </section>
++    </article>
++  );
++}
+diff --git a/apps/frontend/src/components/auth/register.tsx b/apps/frontend/src/components/auth/register.tsx
+index 24ae862..9e97da3 100644
+--- a/apps/frontend/src/components/auth/register.tsx
++++ b/apps/frontend/src/components/auth/register.tsx
+@@ -228,7 +228,7 @@ export function RegisterAfter({
+                 )}
+                 &nbsp;
+                 <a
+-                  href={`https://postiz.com/terms`}
++                  href="/terms"
+                   className="underline hover:font-bold"
+                   rel="nofollow"
+                 >
+@@ -237,7 +237,7 @@ export function RegisterAfter({
+                 &nbsp;
+                 {t('and', 'and')}&nbsp;
+                 <a
+-                  href={`https://postiz.com/privacy`}
++                  href="/privacy"
+                   rel="nofollow"
+                   className="underline hover:font-bold"
+                 >
+diff --git a/apps/frontend/src/components/launches/helpers/use.custom.provider.function.ts b/apps/frontend/src/components/launches/helpers/use.custom.provider.function.ts
+index 189e33d..68af28f 100644
+--- a/apps/frontend/src/components/launches/helpers/use.custom.provider.function.ts
++++ b/apps/frontend/src/components/launches/helpers/use.custom.provider.function.ts
+@@ -3,6 +3,7 @@ import { useCallback } from 'react';
+ import { useFetch } from '@gitroom/helpers/utils/custom.fetch';
+ export const useCustomProviderFunction = () => {
+   const { integration } = useIntegration();
++  const integrationId = integration?.id;
+   const fetch = useFetch();
+   const get = useCallback(
+     async (funcName: string, customData?: any) => {
+@@ -10,7 +11,7 @@ export const useCustomProviderFunction = () => {
+         method: 'POST',
+         body: JSON.stringify({
+           name: funcName,
+-          id: integration?.id!,
++          id: integrationId!,
+           data: customData,
+         }),
+       });
+@@ -19,7 +20,7 @@ export const useCustomProviderFunction = () => {
+       }
+       return load.json();
+     },
+-    [integration]
++    [integrationId]
+   );
+   return {
+     get,
+diff --git a/apps/frontend/src/components/new-launch/providers/tiktok/tiktok.provider.tsx b/apps/frontend/src/components/new-launch/providers/tiktok/tiktok.provider.tsx
+index 99bb9af..96d979a 100644
+--- a/apps/frontend/src/components/new-launch/providers/tiktok/tiktok.provider.tsx
++++ b/apps/frontend/src/components/new-launch/providers/tiktok/tiktok.provider.tsx
+@@ -1,9 +1,6 @@
+ 'use client';
+ 
+-import {
+-  FC,
+-  useMemo,
+-} from 'react';
++import { FC, useEffect, useMemo, useState } from 'react';
+ import {
+   PostComment,
+   withProvider,
+@@ -15,6 +12,7 @@ import { Checkbox } from '@gitroom/react/form/checkbox';
+ import clsx from 'clsx';
+ import { useT } from '@gitroom/react/translation/get.transation.service.client';
+ import { useIntegration } from '@gitroom/frontend/components/launches/helpers/use.integration';
++import { useCustomProviderFunction } from '@gitroom/frontend/components/launches/helpers/use.custom.provider.function';
+ import { Input } from '@gitroom/react/form/input';
+ import { TiktokPreview } from '@gitroom/frontend/components/new-launch/providers/tiktok/tiktok.preview';
+ import { TikTokMusicSelector } from '@gitroom/frontend/components/new-launch/providers/tiktok/tiktok.music';
+@@ -23,8 +21,11 @@ import { TikTokLocationSelector } from '@gitroom/frontend/components/new-launch/
+ const TikTokSettings: FC<{
+   values?: any;
+ }> = (props) => {
+-  const { watch, register } = useSettings();
++  const { watch, register, setError, clearErrors, setValue } = useSettings();
+   const { value, integration } = useIntegration();
++  const { get } = useCustomProviderFunction();
++  const [creatorInfo, setCreatorInfo] = useState<any>(null);
++  const [creatorInfoError, setCreatorInfoError] = useState('');
+   const t = useT();
+ 
+   // Music and location come from the Business API (v1.3) - the legacy Content
+@@ -32,7 +33,9 @@ const TikTokSettings: FC<{
+   const isBusiness = integration?.identifier === 'tiktok-business';
+ 
+   const isTitle = useMemo(() => {
+-    return value?.[0]?.image?.some((p) => (p?.path?.indexOf?.('mp4') ?? -1) === -1);
++    return value?.[0]?.image?.some(
++      (p) => (p?.path?.indexOf?.('mp4') ?? -1) === -1
++    );
+   }, [value]);
+ 
+   const hasMedia = (value?.[0]?.image?.length ?? 0) > 0;
+@@ -42,9 +45,122 @@ const TikTokSettings: FC<{
+   const autoAddMusic = watch('autoAddMusic');
+   const brand_organic_toggle = watch('brand_organic_toggle');
+   const brand_content_toggle = watch('brand_content_toggle');
++  const privacy_level = watch('privacy_level');
+   const content_posting_method = watch('content_posting_method');
+   const isUploadMode = content_posting_method === 'UPLOAD';
+ 
++  useEffect(() => {
++    if (isBusiness || !integration?.id) return;
++
++    let cancelled = false;
++    setCreatorInfo(null);
++    setCreatorInfoError('');
++
++    get('creatorInfo')
++      .then((data) => {
++        if (!cancelled) setCreatorInfo(data);
++      })
++      .catch((err) => {
++        if (!cancelled) {
++          setCreatorInfoError(
++            err?.message || 'Unable to load the latest TikTok creator settings.'
++          );
++        }
++      });
++
++    return () => {
++      cancelled = true;
++    };
++  }, [get, integration?.id, isBusiness]);
++
++  useEffect(() => {
++    if (isBusiness || isUploadMode || !creatorInfoError) {
++      clearErrors('tiktok_creator_info');
++      return;
++    }
++    setError('tiktok_creator_info', {
++      type: 'validate',
++      message: creatorInfoError,
++    });
++  }, [clearErrors, creatorInfoError, isBusiness, isUploadMode, setError]);
++
++  useEffect(() => {
++    if (
++      !isBusiness &&
++      !isUploadMode &&
++      disclose &&
++      !brand_organic_toggle &&
++      !brand_content_toggle
++    ) {
++      setError('tiktok_commercial_disclosure', {
++        type: 'validate',
++        message:
++          'Choose Your brand, Branded content, or both before publishing.',
++      });
++      return;
++    }
++    clearErrors('tiktok_commercial_disclosure');
++  }, [
++    brand_content_toggle,
++    brand_organic_toggle,
++    clearErrors,
++    disclose,
++    isBusiness,
++    isUploadMode,
++    setError,
++  ]);
++
++  useEffect(() => {
++    if (!isBusiness && brand_content_toggle && privacy_level === 'SELF_ONLY') {
++      setValue('privacy_level', '', {
++        shouldDirty: true,
++        shouldValidate: true,
++      });
++    }
++  }, [brand_content_toggle, isBusiness, privacy_level, setValue]);
++
++  const videoPath = value?.[0]?.image?.[0]?.path;
++  useEffect(() => {
++    const maxDuration = Number(creatorInfo?.max_video_post_duration_sec || 0);
++    if (isBusiness || isUploadMode || !isVideo || !videoPath || !maxDuration) {
++      clearErrors('tiktok_video_duration');
++      return;
++    }
++
++    const video = document.createElement('video');
++    video.preload = 'metadata';
++    video.src = videoPath;
++    video.onloadedmetadata = () => {
++      if (video.duration > maxDuration) {
++        setError('tiktok_video_duration', {
++          type: 'validate',
++          message: `TikTok allows a maximum video duration of ${maxDuration}s for this creator.`,
++        });
++      } else {
++        clearErrors('tiktok_video_duration');
++      }
++    };
++    video.onerror = () => {
++      setError('tiktok_video_duration', {
++        type: 'validate',
++        message: 'Unable to verify the video duration for TikTok.',
++      });
++    };
++
++    return () => {
++      video.removeAttribute('src');
++      video.load();
++    };
++  }, [
++    clearErrors,
++    creatorInfo?.max_video_post_duration_sec,
++    isBusiness,
++    isUploadMode,
++    isVideo,
++    setError,
++    videoPath,
++  ]);
++
+   // TikTok ignores every setting except the title / content when the posting
+   // method is UPLOAD, so we hide them rather than pretend they apply. The fields
+   // stay mounted and registered: their values must survive the switch, and
+@@ -65,7 +181,7 @@ const TikTokSettings: FC<{
+     );
+   }, [hasMedia, isUploadMode, isVideo, t]);
+ 
+-  const privacyLevel = [
++  const allPrivacyLevels = [
+     {
+       value: 'PUBLIC_TO_EVERYONE',
+       label: t('public_to_everyone', 'Public to everyone'),
+@@ -83,6 +199,12 @@ const TikTokSettings: FC<{
+       label: t('self_only', 'Self only'),
+     },
+   ];
++  const privacyLevel =
++    !isBusiness && Array.isArray(creatorInfo?.privacy_level_options)
++      ? allPrivacyLevels.filter((item) =>
++          creatorInfo.privacy_level_options.includes(item.value)
++        )
++      : allPrivacyLevels;
+   const contentPostingMethod = [
+     {
+       value: 'DIRECT_POST',
+@@ -113,6 +235,37 @@ const TikTokSettings: FC<{
+   return (
+     <div className="flex flex-col">
+       {/*<CheckTikTokValidity picture={props?.values?.[0]?.image?.[0]?.path} />*/}
++      {!isBusiness && (
++        <div className="bg-tableBorder p-[12px] mb-[18px] rounded-[10px] text-[13px] text-balance">
++          <div className="font-semibold">
++            {creatorInfo
++              ? `Posting to TikTok as ${creatorInfo.creator_nickname}`
++              : `Posting to TikTok as ${
++                  integration?.name || 'connected creator'
++                }`}
++          </div>
++          {creatorInfo?.creator_username && (
++            <div className="mt-[3px]">@{creatorInfo.creator_username}</div>
++          )}
++          {creatorInfo?.max_video_post_duration_sec && (
++            <div className="mt-[3px]">
++              Maximum video length for this creator:{' '}
++              {creatorInfo.max_video_post_duration_sec}s
++            </div>
++          )}
++          {!creatorInfo && !creatorInfoError && (
++            <div className="mt-[3px]">
++              Loading latest TikTok creator settings…
++            </div>
++          )}
++          {creatorInfoError && (
++            <div className="mt-[6px] text-red-600">
++              TikTok creator settings could not be loaded. Reconnect this TikTok
++              channel before Direct Post.
++            </div>
++          )}
++        </div>
++      )}
+       {tiktokRestrictionNotice && (
+         <div className="bg-tableBorder p-[10px] mb-[18px] rounded-[10px] flex gap-[10px] items-start text-[13px] text-balance">
+           <div className="shrink-0 mt-[2px]">
+@@ -136,14 +289,23 @@ const TikTokSettings: FC<{
+       <div className={directPostOnly}>
+         <Select
+           label={t('label_who_can_see_this_video', 'Who can see this video?')}
+-          disabled={isUploadMode}
+-          {...register('privacy_level', {
+-            value: 'PUBLIC_TO_EVERYONE',
+-          })}
++          disabled={isUploadMode || (!isBusiness && !creatorInfo)}
++          {...register(
++            'privacy_level',
++            isBusiness ? { value: 'PUBLIC_TO_EVERYONE' } : {}
++          )}
+         >
+-          <option value="">{t('select', 'Select')}</option>
++          <option value="">
++            {!isBusiness && !creatorInfo
++              ? t('loading_tiktok_privacy', 'Loading TikTok privacy options…')
++              : t('select', 'Select')}
++          </option>
+           {privacyLevel.map((item) => (
+-            <option key={item.value} value={item.value}>
++            <option
++              key={item.value}
++              value={item.value}
++              disabled={brand_content_toggle && item.value === 'SELF_ONLY'}
++            >
+               {item.label}
+             </option>
+           ))}
+@@ -169,7 +331,12 @@ const TikTokSettings: FC<{
+           </option>
+         ))}
+       </Select>
+-      {isUploadMode && <div className="-mt-[23px] mb-[23px] text-red-600">After posting you fill find a notification inside your Inbox about your post (not content studio)</div>}
++      {isUploadMode && (
++        <div className="-mt-[23px] mb-[23px] text-red-600">
++          After posting you fill find a notification inside your Inbox about
++          your post (not content studio)
++        </div>
++      )}
+       <div className={clsx('flex flex-col', directPostOnly)}>
+         <Select
+           label={
+@@ -193,7 +360,7 @@ const TikTokSettings: FC<{
+           {isBusiness
+             ? t(
+                 'tiktok_random_music_only_for_photos',
+-                'This feature is available only for photos, it adds a random trending track from TikTok\'s commercial music library.'
++                "This feature is available only for photos, it adds a random trending track from TikTok's commercial music library."
+               )
+             : t(
+                 'this_feature_available_only_for_photos',
+@@ -228,39 +395,50 @@ const TikTokSettings: FC<{
+           {t('tiktok_video_features', 'Video features')}
+         </div>
+         <div className="flex gap-[40px]">
+-          <Checkbox
+-            variant="hollow"
+-            label={t('label_duet', 'Allow Duet')}
+-            disabled={isUploadMode}
+-            {...register('duet', {
+-              value: false,
+-            })}
+-          />
+-          <Checkbox
+-            label={t('label_stitch', 'Allow Stitch')}
+-            variant="hollow"
+-            disabled={isUploadMode}
+-            {...register('stitch', {
+-              value: false,
+-            })}
+-          />
+-          <Checkbox
+-            label={t('video_made_with_ai', 'Video made with AI')}
+-            variant="hollow"
+-            disabled={isUploadMode}
+-            {...register('video_made_with_ai', {
+-              value: false,
+-            })}
+-          />
++          {isVideo && (
++            <>
++              <Checkbox
++                variant="hollow"
++                label={t('label_duet', 'Allow Duet')}
++                disabled={
++                  isUploadMode || (!isBusiness && !!creatorInfo?.duet_disabled)
++                }
++                {...register('duet', {
++                  value: false,
++                })}
++              />
++              <Checkbox
++                label={t('label_stitch', 'Allow Stitch')}
++                variant="hollow"
++                disabled={
++                  isUploadMode ||
++                  (!isBusiness && !!creatorInfo?.stitch_disabled)
++                }
++                {...register('stitch', {
++                  value: false,
++                })}
++              />
++              <Checkbox
++                label={t('video_made_with_ai', 'Video made with AI')}
++                variant="hollow"
++                disabled={isUploadMode}
++                {...register('video_made_with_ai', {
++                  value: false,
++                })}
++              />
++            </>
++          )}
+         </div>
+         <hr className="my-[15px] mb-[25px] border-tableBorder" />
+         <div className="flex flex-col gap-[20px]">
+           <Checkbox
+             label={t('label_comments', 'Allow Comments')}
+             variant="hollow"
+-            disabled={isUploadMode}
++            disabled={
++              isUploadMode || (!isBusiness && !!creatorInfo?.comment_disabled)
++            }
+             {...register('comment', {
+-              value: true,
++              value: false,
+             })}
+           />
+           <Checkbox
+@@ -288,14 +466,24 @@ const TikTokSettings: FC<{
+                 </svg>
+               </div>
+               <div>
+-                {t(
+-                  'your_video_will_be_labeled_promotional',
+-                  'Your video will be labeled "Promotional Content".'
+-                )}
++                {brand_content_toggle
++                  ? t(
++                      'your_video_will_be_labeled_paid_partnership',
++                      'Your photo/video will be labeled "Paid partnership".'
++                    )
++                  : brand_organic_toggle
++                  ? t(
++                      'your_video_will_be_labeled_promotional',
++                      'Your photo/video will be labeled "Promotional content".'
++                    )
++                  : t(
++                      'choose_commercial_content_type',
++                      'Choose Your brand, Branded content, or both.'
++                    )}
+                 <br />
+                 {t(
+                   'this_cannot_be_changed_once_posted',
+-                  'This cannot be changed once your video is posted.'
++                  'This cannot be changed once your content is posted.'
+                 )}
+               </div>
+             </div>
+@@ -307,7 +495,12 @@ const TikTokSettings: FC<{
+             )}
+           </div>
+         </div>
+-        <div className={clsx(!disclose && 'invisible h-0 overflow-hidden', 'mt-[20px]')}>
++        <div
++          className={clsx(
++            !disclose && 'invisible h-0 overflow-hidden',
++            'mt-[20px]'
++          )}
++        >
+           <Checkbox
+             variant="hollow"
+             label={t('label_your_brand', 'Your brand')}
+@@ -346,36 +539,38 @@ const TikTokSettings: FC<{
+               'This video will be classified as Branded Content.'
+             )}
+           </div>
+-          {(brand_organic_toggle || brand_content_toggle) && (
+-            <div className="my-[10px] text-[14px] text-balance">
+-              {t(
+-                'by_posting_you_agree_to_tiktoks',
+-                "By posting, you agree to TikTok's"
+-              )}
+-              {[
+-                brand_organic_toggle || brand_content_toggle ? (
+-                  <a
+-                    target="_blank"
+-                    className="text-[#B69DEC] hover:underline"
+-                    href="https://www.tiktok.com/legal/page/global/music-usage-confirmation/en"
+-                  >
+-                    {t('music_usage_confirmation', 'Music Usage Confirmation')}
+-                  </a>
+-                ) : undefined,
+-                brand_content_toggle ? <> {t('and', 'and')} </> : undefined,
+-                brand_content_toggle ? (
+-                  <a
+-                    target="_blank"
+-                    className="text-[#B69DEC] hover:underline"
+-                    href="https://www.tiktok.com/legal/page/global/bc-policy/en"
+-                  >
+-                    {t('branded_content_policy', 'Branded Content Policy')}
+-                  </a>
+-                ) : undefined,
+-              ].filter((f) => f)}
+-            </div>
+-          )}
+         </div>
++        {!isUploadMode && (
++          <div className="my-[18px] text-[14px] text-balance">
++            {t(
++              'by_posting_you_agree_to_tiktoks',
++              "By posting, you agree to TikTok's "
++            )}
++            <a
++              target="_blank"
++              rel="noreferrer"
++              className="text-[#B69DEC] hover:underline"
++              href="https://www.tiktok.com/legal/page/global/music-usage-confirmation/en"
++            >
++              {t('music_usage_confirmation', 'Music Usage Confirmation')}
++            </a>
++            {brand_content_toggle && (
++              <>
++                {' '}
++                {t('and', 'and')}{' '}
++                <a
++                  target="_blank"
++                  rel="noreferrer"
++                  className="text-[#B69DEC] hover:underline"
++                  href="https://www.tiktok.com/legal/page/global/bc-policy/en"
++                >
++                  {t('branded_content_policy', 'Branded Content Policy')}
++                </a>
++              </>
++            )}
++            .
++          </div>
++        )}
+       </div>
+     </div>
+   );
+diff --git a/apps/frontend/src/proxy.ts b/apps/frontend/src/proxy.ts
+index 360c937..b3fb230 100644
+--- a/apps/frontend/src/proxy.ts
++++ b/apps/frontend/src/proxy.ts
+@@ -47,7 +47,10 @@ export async function proxy(request: NextRequest) {
+     nextUrl.pathname.startsWith('/uploads/') ||
+     nextUrl.pathname.startsWith('/p/') ||
+     nextUrl.pathname.startsWith('/provider/') ||
+-    nextUrl.pathname.startsWith('/icons/')
++    nextUrl.pathname.startsWith('/icons/') ||
++    nextUrl.pathname === '/review' ||
++    nextUrl.pathname === '/privacy' ||
++    nextUrl.pathname === '/terms'
+   ) {
+     return topResponse;
+   }
+@@ -176,4 +179,4 @@ export async function proxy(request: NextRequest) {
+ // See "Matching Paths" below to learn more
+ export const config = {
+   matcher: '/((?!api/|_next/|_static/|_vercel|[\\w-]+\\.\\w+).*)',
+-};
+\ No newline at end of file
++};
+diff --git a/libraries/nestjs-libraries/src/dtos/posts/providers-settings/tiktok.dto.ts b/libraries/nestjs-libraries/src/dtos/posts/providers-settings/tiktok.dto.ts
+index f5be6b0..146bad8 100644
+--- a/libraries/nestjs-libraries/src/dtos/posts/providers-settings/tiktok.dto.ts
++++ b/libraries/nestjs-libraries/src/dtos/posts/providers-settings/tiktok.dto.ts
+@@ -1,5 +1,15 @@
+ import {
+-  IsBoolean, ValidateIf, IsIn, IsString, MaxLength, IsOptional, IsDefined, IsNumber, Min, Max, ValidateNested
++  IsBoolean,
++  ValidateIf,
++  IsIn,
++  IsString,
++  MaxLength,
++  IsOptional,
++  IsDefined,
++  IsNumber,
++  Min,
++  Max,
++  ValidateNested,
+ } from 'class-validator';
+ import { Type } from 'class-transformer';
+ import { JSONSchema } from 'class-validator-jsonschema';
+@@ -77,6 +87,7 @@ export class TikTokDto {
+   })
+   title: string;
+ 
++  @ValidateIf((p) => p.content_posting_method === 'DIRECT_POST')
+   @IsIn([
+     'PUBLIC_TO_EVERYONE',
+     'MUTUAL_FOLLOW_FRIENDS',
+diff --git a/libraries/nestjs-libraries/src/integrations/social/tiktok.provider.ts b/libraries/nestjs-libraries/src/integrations/social/tiktok.provider.ts
+index 63612dd..1360050 100644
+--- a/libraries/nestjs-libraries/src/integrations/social/tiktok.provider.ts
++++ b/libraries/nestjs-libraries/src/integrations/social/tiktok.provider.ts
+@@ -417,21 +417,31 @@ export class TiktokProvider extends SocialAbstract implements SocialProvider {
+     };
+   }
+ 
++  async creatorInfo(accessToken: string) {
++    const response = await fetch(
++      'https://open.tiktokapis.com/v2/post/publish/creator_info/query/',
++      {
++        method: 'POST',
++        headers: {
++          'Content-Type': 'application/json; charset=UTF-8',
++          Authorization: `Bearer ${accessToken}`,
++        },
++      }
++    );
++    const payload = await response.json();
++    if (!response.ok || (payload?.error?.code && payload.error.code !== 'ok')) {
++      throw new Error(
++        payload?.error?.message ||
++          payload?.error?.code ||
++          'Unable to load TikTok creator information'
++      );
++    }
++
++    return payload.data;
++  }
++
+   async maxVideoLength(accessToken: string) {
+-    const {
+-      data: { max_video_post_duration_sec },
+-    } = await (
+-      await fetch(
+-        'https://open.tiktokapis.com/v2/post/publish/creator_info/query/',
+-        {
+-          method: 'POST',
+-          headers: {
+-            'Content-Type': 'application/json; charset=UTF-8',
+-            Authorization: `Bearer ${accessToken}`,
+-          },
+-        }
+-      )
+-    ).json();
++    const { max_video_post_duration_sec } = await this.creatorInfo(accessToken);
+ 
+     return {
+       maxDurationSeconds: max_video_post_duration_sec,
+@@ -545,6 +555,12 @@ export class TiktokProvider extends SocialAbstract implements SocialProvider {
+     const method = this.contentPostingMethod(firstPost);
+ 
+     if (method === 'DIRECT_POST') {
++      if (!firstPost.settings.privacy_level) {
++        throw new Error(
++          'TikTok Direct Post requires the user to manually select a privacy level'
++        );
++      }
++
+       return {
+         post_info: {
+           ...(isPhoto && firstPost.settings.title
+@@ -554,8 +570,7 @@ export class TiktokProvider extends SocialAbstract implements SocialProvider {
+             ? { title: firstPost.message }
+             : {}),
+           ...(isPhoto ? { description: firstPost.message } : {}),
+-          privacy_level:
+-            firstPost.settings.privacy_level || 'PUBLIC_TO_EVERYONE',
++          privacy_level: firstPost.settings.privacy_level,
+           ...(isPhoto
+             ? {}
+             : { disable_duet: !this.assetBoolean(firstPost.settings.duet) }),
+-- 
+2.53.0
+

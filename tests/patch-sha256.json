@@ -1,0 +1,9 @@
+{
+  "postiz-instagram-location.patch": "08472c768c007eb13f76f1f4bf7f0ee47150b8f8fc31d59298604db4d2f93ba9",
+  "postiz-local-agent.patch": "bf82c40d63e6a2d0006d937869d2229181bc3134b10c815ea08def7f413cea21",
+  "postiz-omniroute.patch": "c43fa70ef2b37a29ec10581b5ddcceac9cf9f90c549cd85455c066642807f084",
+  "postiz-reddit-responsible-builder.patch": "fc935f7b90c8d796f36ac361cf15a6e104401be8a379c7fb4dff2d691114d813",
+  "postiz-s3.patch": "baff59df142c2cd6f82dac781975e354a34e98ad4f6e7722da17bb34a7930c0c",
+  "postiz-tiktok-audit.patch": "8118b9b724002a47fa5b2ad5852dfb510613c0ef486bc8a9b99476d84a704db7",
+  "postiz-tiktok-multiaccount.patch": "ba505fe9499b444fafc1e009c7a4225c37770ba563615897ec17fa1ded8c6551"
+}

@@ -1,0 +1,60 @@
+From 0347de7dac1f045c814e46bb85ed9c50a0b71dc1 Mon Sep 17 00:00:00 2001
+From: cloud9-postiz-builder <root@cloud9.local>
+Date: Tue, 29 Sep 2026 00:29:08 +0200
+Subject: [PATCH] fix: limit Reddit posts to one subreddit
+
+---
+ .../new-launch/providers/reddit/reddit.provider.tsx      | 9 +++++++--
+ .../src/dtos/posts/providers-settings/reddit.dto.ts      | 4 ++++
+ 2 files changed, 11 insertions(+), 2 deletions(-)
+
+diff --git a/apps/frontend/src/components/new-launch/providers/reddit/reddit.provider.tsx b/apps/frontend/src/components/new-launch/providers/reddit/reddit.provider.tsx
+index e09cae2..b91af69 100644
+--- a/apps/frontend/src/components/new-launch/providers/reddit/reddit.provider.tsx
++++ b/apps/frontend/src/components/new-launch/providers/reddit/reddit.provider.tsx
+@@ -164,8 +164,9 @@ const RedditSettings: FC = () => {
+   const t = useT();
+ 
+   const addField = useCallback(() => {
++    if (fields.length >= 1) return;
+     append({});
+-  }, [fields, append]);
++  }, [fields.length, append]);
+   const deleteField = useCallback(
+     (index: number) => async () => {
+       if (
+@@ -196,7 +197,11 @@ const RedditSettings: FC = () => {
+           </div>
+         ))}
+       </div>
+-      <Button onClick={addField}>{t('add_subreddit', 'Add Subreddit')}</Button>
++      {fields.length === 0 && (
++        <Button onClick={addField}>
++          {t('add_subreddit', 'Add Subreddit')}
++        </Button>
++      )}
+       {fields.length === 0 && (
+         <div className="text-red-500 text-[12px] mt-[10px]">
+           {t(
+diff --git a/libraries/nestjs-libraries/src/dtos/posts/providers-settings/reddit.dto.ts b/libraries/nestjs-libraries/src/dtos/posts/providers-settings/reddit.dto.ts
+index f4d4d81..ddbc63b 100644
+--- a/libraries/nestjs-libraries/src/dtos/posts/providers-settings/reddit.dto.ts
++++ b/libraries/nestjs-libraries/src/dtos/posts/providers-settings/reddit.dto.ts
+@@ -1,4 +1,5 @@
+ import {
++  ArrayMaxSize,
+   ArrayMinSize,
+   IsBoolean,
+   IsDefined,
+@@ -79,5 +80,8 @@ export class RedditSettingsDto {
+   @Type(() => RedditSettingsValueDto)
+   @ValidateNested({ each: true })
+   @ArrayMinSize(1)
++  @ArrayMaxSize(1, {
++    message: 'Reddit publications are limited to one subreddit per post',
++  })
+   subreddit: RedditSettingsValueDto[];
+ }
+-- 
+2.53.0
+

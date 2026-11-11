@@ -1,0 +1,94 @@
+name: Rebase seven Cloud9 patches onto official Postiz and build GHCR candidate
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "37 6 * * 1"
+  workflow_dispatch:
+permissions:
+  contents: read
+  packages: write
+concurrency:
+  group: cloud9-postiz-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  verify-and-build-immutable-candidate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 115
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate public source privacy, AGPL license and seven SHA256 patch files
+        run: python3 tests/privacy.py
+      - id: upstream
+        name: Resolve official latest stable Postiz release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="$(gh api repos/gitroomhq/postiz-app/releases/latest --jq .tag_name)"
+          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+          echo "POSTIZ_LATEST_OFFICIAL_STABLE=$tag"
+      - name: Clone exactly the official upstream release and apply only missing features
+        shell: bash
+        env:
+          UPSTREAM_TAG: ${{ steps.upstream.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch "$UPSTREAM_TAG" https://github.com/gitroomhq/postiz-app.git upstream
+          bash scripts/apply_upstream.sh upstream | tee /tmp/postiz-rebase.log
+          grep -F 'POSTIZ_SEVEN_PATCH_FAMILIES_CONDITIONAL_APPLY_PASS' /tmp/postiz-rebase.log
+          git -C upstream diff --check
+          echo "PATCHED_OFFICIAL_POSTIZ_COMMIT=$(git -C upstream rev-parse HEAD)" >> "$GITHUB_ENV"
+      - uses: docker/setup-buildx-action@v3
+      - name: Build the patched official Dockerfile.dev on GitHub not Cloud9
+        uses: docker/build-push-action@v6
+        with:
+          context: ./upstream
+          file: ./upstream/Dockerfile.dev
+          pull: true
+          load: true
+          platforms: linux/amd64
+          tags: local/cloud9-postiz:validated-candidate
+          build-args: |
+            NEXT_PUBLIC_VERSION=${{ steps.upstream.outputs.tag }}-cloud9
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Image static functionality and original native media cover protections
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint sh local/cloud9-postiz:validated-candidate -lc '
+            set -eu
+            test "$(stat -c %a /)" = 755
+            test -f /app/libraries/nestjs-libraries/src/upload/s3.storage.ts
+            test -f /app/libraries/nestjs-libraries/src/upload/s3.uploader.ts
+            test -f /app/apps/frontend/src/helpers/upload.provider.ts
+            test -f /app/libraries/nestjs-libraries/src/openai/image.generator.ts
+            test -f /app/apps/backend/dist/libraries/nestjs-libraries/src/upload/s3.uploader.js
+            grep -Fq POSTIZ_LLM_BASE_URL /app/libraries/nestjs-libraries/src/openai/openai.service.ts
+            grep -Fq POSTIZ_IMAGE_BASE_URL /app/libraries/nestjs-libraries/src/openai/image.generator.ts
+            grep -Fq POSTIZ_LOCAL_UPLOAD_CIDRS /app/apps/frontend/src/helpers/upload.provider.ts
+            grep -Fq "cover_url=" /app/libraries/nestjs-libraries/src/integrations/social/instagram.provider.ts
+            grep -Fq video_cover_timestamp_ms /app/libraries/nestjs-libraries/src/integrations/social/tiktok.provider.ts
+            echo POSTIZ_GHCR_STATIC_PATCHED_IMAGE_FUNCTIONAL_PATHS_PASS
+          '
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish immutable candidate only — no latest promotion or production deployment
+        shell: bash
+        env:
+          VERSION: ${{ steps.upstream.outputs.version }}
+        run: |
+          set -euo pipefail
+          ref="ghcr.io/godsquantum/cloud9-postiz:upstream-$VERSION-sha-${GITHUB_SHA:0:12}-run-$GITHUB_RUN_ID"
+          docker tag local/cloud9-postiz:validated-candidate "$ref"
+          docker push "$ref"
+          echo "Published source-patched candidate $ref" >> "$GITHUB_STEP_SUMMARY"
+          echo "No latest tag or production switch. Verify TikTok OAuth, social posting, DB/schema and S3 before promotion." >> "$GITHUB_STEP_SUMMARY"
+          echo POSTIZ_IMMUTABLE_GHCR_CANDIDATE_PUBLISHED_NO_PRODUCTION_SWITCH

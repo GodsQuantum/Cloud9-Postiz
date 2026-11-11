@@ -1,0 +1,590 @@
+From 57e2d2a7f6efe6aed8a8603ba8b0f88d9b0bf2a3 Mon Sep 17 00:00:00 2001
+From: cloud9-postiz-builder <root@cloud9.local>
+Date: Mon, 21 Sep 2026 22:56:48 +0200
+Subject: [PATCH] feat: route Postiz text AI through configurable OpenAI
+ endpoint
+
+---
+ .../src/api/routes/copilot.controller.ts      | 25 +++++++---
+ .../src/agent/agent.graph.insert.service.ts   | 10 +++-
+ .../src/agent/agent.graph.service.ts          | 10 +++-
+ .../src/chat/load.tools.service.ts            | 15 +++++-
+ .../prisma/autopost/autopost.service.ts       | 10 +++-
+ .../src/openai/openai.service.ts              | 47 ++++++++++++-------
+ 6 files changed, 85 insertions(+), 32 deletions(-)
+
+diff --git a/apps/backend/src/api/routes/copilot.controller.ts b/apps/backend/src/api/routes/copilot.controller.ts
+index 63d8ed0..393088a 100644
+--- a/apps/backend/src/api/routes/copilot.controller.ts
++++ b/apps/backend/src/api/routes/copilot.controller.ts
+@@ -20,9 +20,20 @@ import { MastraAgent } from '@ag-ui/mastra';
+ import { MastraService } from '@gitroom/nestjs-libraries/chat/mastra.service';
+ import { Request, Response } from 'express';
+ import { RequestContext } from '@mastra/core/di';
++import OpenAI from 'openai';
+ import { CheckPolicies } from '@gitroom/backend/services/auth/permissions/permissions.ability';
+ import { AuthorizationActions, Sections } from '@gitroom/backend/services/auth/permissions/permission.exception.class';
+ 
++const postizLlmApiKey =
++  process.env.POSTIZ_LLM_API_KEY || process.env.OPENAI_API_KEY;
++const postizLlmModel = process.env.POSTIZ_LLM_MODEL || 'gpt-4.1';
++const postizLlmClient = new OpenAI({
++  apiKey: postizLlmApiKey || 'sk-proj-',
++  ...(process.env.POSTIZ_LLM_BASE_URL
++    ? { baseURL: process.env.POSTIZ_LLM_BASE_URL }
++    : {}),
++});
++
+ export type ChannelsContext = {
+   integrations: string;
+   organization: string;
+@@ -48,8 +59,8 @@ export class CopilotController {
+   @Post('/chat')
+   chatAgent(@Req() req: Request, @Res() res: Response) {
+     if (
+-      process.env.OPENAI_API_KEY === undefined ||
+-      process.env.OPENAI_API_KEY === ''
++      postizLlmApiKey === undefined ||
++      postizLlmApiKey === ''
+     ) {
+       Logger.warn('OpenAI API key not set, chat functionality will not work');
+       return;
+@@ -60,7 +71,8 @@ export class CopilotController {
+       cors: copilotCors(),
+       runtime: new CopilotRuntime(),
+       serviceAdapter: new OpenAIAdapter({
+-        model: 'gpt-4.1',
++        openai: postizLlmClient as any,
++        model: postizLlmModel,
+       }),
+     });
+ 
+@@ -75,8 +87,8 @@ export class CopilotController {
+     @GetOrgFromRequest() organization: Organization
+   ) {
+     if (
+-      process.env.OPENAI_API_KEY === undefined ||
+-      process.env.OPENAI_API_KEY === ''
++      postizLlmApiKey === undefined ||
++      postizLlmApiKey === ''
+     ) {
+       Logger.warn('OpenAI API key not set, chat functionality will not work');
+       return;
+@@ -106,7 +118,8 @@ export class CopilotController {
+       cors: copilotCors(),
+       runtime,
+       serviceAdapter: new OpenAIAdapter({
+-        model: 'gpt-4.1',
++        openai: postizLlmClient as any,
++        model: postizLlmModel,
+       }),
+     });
+ 
+diff --git a/libraries/nestjs-libraries/src/agent/agent.graph.insert.service.ts b/libraries/nestjs-libraries/src/agent/agent.graph.insert.service.ts
+index 1a60b73..6b4d873 100644
+--- a/libraries/nestjs-libraries/src/agent/agent.graph.insert.service.ts
++++ b/libraries/nestjs-libraries/src/agent/agent.graph.insert.service.ts
+@@ -9,8 +9,14 @@ import { agentTopics } from '@gitroom/nestjs-libraries/agent/agent.topics';
+ import { PostsService } from '@gitroom/nestjs-libraries/database/prisma/posts/posts.service';
+ 
+ const model = new ChatOpenAI({
+-  apiKey: process.env.OPENAI_API_KEY || 'sk-proj-',
+-  model: 'gpt-4o-2024-08-06',
++  apiKey:
++    process.env.POSTIZ_LLM_API_KEY ||
++    process.env.OPENAI_API_KEY ||
++    'sk-proj-',
++  model: process.env.POSTIZ_LLM_MODEL || 'gpt-4o-2024-08-06',
++  configuration: process.env.POSTIZ_LLM_BASE_URL
++    ? { baseURL: process.env.POSTIZ_LLM_BASE_URL }
++    : undefined,
+   temperature: 0,
+ });
+ 
+diff --git a/libraries/nestjs-libraries/src/agent/agent.graph.service.ts b/libraries/nestjs-libraries/src/agent/agent.graph.service.ts
+index ada9684..f1a8844 100644
+--- a/libraries/nestjs-libraries/src/agent/agent.graph.service.ts
++++ b/libraries/nestjs-libraries/src/agent/agent.graph.service.ts
+@@ -23,8 +23,14 @@ const tools = !process.env.TAVILY_API_KEY
+ const toolNode = new ToolNode(tools);
+ 
+ const model = new ChatOpenAI({
+-  apiKey: process.env.OPENAI_API_KEY || 'sk-proj-',
+-  model: 'gpt-4.1',
++  apiKey:
++    process.env.POSTIZ_LLM_API_KEY ||
++    process.env.OPENAI_API_KEY ||
++    'sk-proj-',
++  model: process.env.POSTIZ_LLM_MODEL || 'gpt-4.1',
++  configuration: process.env.POSTIZ_LLM_BASE_URL
++    ? { baseURL: process.env.POSTIZ_LLM_BASE_URL }
++    : undefined,
+   temperature: 0.7,
+ });
+ 
+diff --git a/libraries/nestjs-libraries/src/chat/load.tools.service.ts b/libraries/nestjs-libraries/src/chat/load.tools.service.ts
+index dcc2a85..200ca4b 100644
+--- a/libraries/nestjs-libraries/src/chat/load.tools.service.ts
++++ b/libraries/nestjs-libraries/src/chat/load.tools.service.ts
+@@ -1,6 +1,6 @@
+ import { Injectable } from '@nestjs/common';
+ import { Agent } from '@mastra/core/agent';
+-import { openai } from '@ai-sdk/openai';
++import { createOpenAI } from '@ai-sdk/openai';
+ import { Memory } from '@mastra/memory';
+ import { pStore } from '@gitroom/nestjs-libraries/chat/mastra.store';
+ import { array, object, string } from 'zod';
+@@ -9,6 +9,17 @@ import { toolList } from '@gitroom/nestjs-libraries/chat/tools/tool.list';
+ import { AgentToolInterface } from '@gitroom/nestjs-libraries/chat/agent.tool.interface';
+ import dayjs from 'dayjs';
+ 
++const postizLlm = createOpenAI({
++  apiKey:
++    process.env.POSTIZ_LLM_API_KEY ||
++    process.env.OPENAI_API_KEY ||
++    'sk-proj-',
++  ...(process.env.POSTIZ_LLM_BASE_URL
++    ? { baseURL: process.env.POSTIZ_LLM_BASE_URL }
++    : {}),
++});
++const postizLlmModel = process.env.POSTIZ_LLM_MODEL || 'gpt-5.2';
++
+ export const AgentState = object({
+   proverbs: array(string()).default([]),
+ });
+@@ -100,7 +111,7 @@ export class LoadToolsService {
+       )}
+ `;
+       },
+-      model: openai('gpt-5.2'),
++      model: postizLlm.chat(postizLlmModel),
+       tools,
+       memory: new Memory({
+         storage: pStore,
+diff --git a/libraries/nestjs-libraries/src/database/prisma/autopost/autopost.service.ts b/libraries/nestjs-libraries/src/database/prisma/autopost/autopost.service.ts
+index 9b7f9e9..05dbf28 100644
+--- a/libraries/nestjs-libraries/src/database/prisma/autopost/autopost.service.ts
++++ b/libraries/nestjs-libraries/src/database/prisma/autopost/autopost.service.ts
+@@ -36,8 +36,14 @@ interface WorkflowChannelsState {
+ }
+ 
+ const model = new ChatOpenAI({
+-  apiKey: process.env.OPENAI_API_KEY || 'sk-proj-',
+-  model: 'gpt-4.1',
++  apiKey:
++    process.env.POSTIZ_LLM_API_KEY ||
++    process.env.OPENAI_API_KEY ||
++    'sk-proj-',
++  model: process.env.POSTIZ_LLM_MODEL || 'gpt-4.1',
++  configuration: process.env.POSTIZ_LLM_BASE_URL
++    ? { baseURL: process.env.POSTIZ_LLM_BASE_URL }
++    : undefined,
+   temperature: 0.7,
+ });
+ 
+diff --git a/libraries/nestjs-libraries/src/openai/openai.service.ts b/libraries/nestjs-libraries/src/openai/openai.service.ts
+index 3d66c25..6ebcc03 100644
+--- a/libraries/nestjs-libraries/src/openai/openai.service.ts
++++ b/libraries/nestjs-libraries/src/openai/openai.service.ts
+@@ -4,10 +4,21 @@ import { shuffle } from 'lodash';
+ import { zodResponseFormat } from 'openai/helpers/zod';
+ import { z } from 'zod';
+ 
+-const openai = new OpenAI({
++const imageOpenai = new OpenAI({
+   apiKey: process.env.OPENAI_API_KEY || 'sk-proj-',
+ });
+ 
++const textOpenai = new OpenAI({
++  apiKey:
++    process.env.POSTIZ_LLM_API_KEY ||
++    process.env.OPENAI_API_KEY ||
++    'sk-proj-',
++  ...(process.env.POSTIZ_LLM_BASE_URL
++    ? { baseURL: process.env.POSTIZ_LLM_BASE_URL }
++    : {}),
++});
++const textModel = process.env.POSTIZ_LLM_MODEL || 'gpt-4.1';
++
+ const PicturePrompt = z.object({
+   prompt: z.string(),
+ });
+@@ -79,7 +90,7 @@ Clips must not overlap. Write the title and the post in this language, whatever
+     // gpt-image models always return base64 (b64_json) and do not accept the
+     // `response_format` parameter, unlike the deprecated dall-e-3.
+     const generate = (
+-      await openai.images.generate({
++      await imageOpenai.images.generate({
+         prompt,
+         model: 'chatgpt-image-latest',
+         size: isVertical ? '1024x1536' : '1024x1024',
+@@ -92,8 +103,8 @@ Clips must not overlap. Write the title and the post in this language, whatever
+   async generatePromptForPicture(prompt: string) {
+     return (
+       (
+-        await openai.chat.completions.parse({
+-          model: 'gpt-4.1',
++        await textOpenai.chat.completions.parse({
++          model: textModel,
+           messages: [
+             {
+               role: 'system',
+@@ -113,8 +124,8 @@ Clips must not overlap. Write the title and the post in this language, whatever
+   async generateVoiceFromText(prompt: string) {
+     return (
+       (
+-        await openai.chat.completions.parse({
+-          model: 'gpt-4.1',
++        await textOpenai.chat.completions.parse({
++          model: textModel,
+           messages: [
+             {
+               role: 'system',
+@@ -134,7 +145,7 @@ Clips must not overlap. Write the title and the post in this language, whatever
+   async generatePosts(content: string) {
+     const posts = (
+       await Promise.all([
+-        openai.chat.completions.create({
++        textOpenai.chat.completions.create({
+           messages: [
+             {
+               role: 'assistant',
+@@ -148,9 +159,9 @@ Clips must not overlap. Write the title and the post in this language, whatever
+           ],
+           n: 5,
+           temperature: 1,
+-          model: 'gpt-4.1',
++          model: textModel,
+         }),
+-        openai.chat.completions.create({
++        textOpenai.chat.completions.create({
+           messages: [
+             {
+               role: 'assistant',
+@@ -164,7 +175,7 @@ Clips must not overlap. Write the title and the post in this language, whatever
+           ],
+           n: 5,
+           temperature: 1,
+-          model: 'gpt-4.1',
++          model: textModel,
+         }),
+       ])
+     ).flatMap((p) => p.choices);
+@@ -190,7 +201,7 @@ Clips must not overlap. Write the title and the post in this language, whatever
+     );
+   }
+   async extractWebsiteText(content: string) {
+-    const websiteContent = await openai.chat.completions.create({
++    const websiteContent = await textOpenai.chat.completions.create({
+       messages: [
+         {
+           role: 'assistant',
+@@ -202,7 +213,7 @@ Clips must not overlap. Write the title and the post in this language, whatever
+           content,
+         },
+       ],
+-      model: 'gpt-4.1',
++      model: textModel,
+     });
+ 
+     const { content: articleContent } = websiteContent.choices[0].message;
+@@ -221,8 +232,8 @@ Clips must not overlap. Write the title and the post in this language, whatever
+ 
+     const posts =
+       (
+-        await openai.chat.completions.parse({
+-          model: 'gpt-4.1',
++        await textOpenai.chat.completions.parse({
++          model: textModel,
+           messages: [
+             {
+               role: 'system',
+@@ -254,8 +265,8 @@ Clips must not overlap. Write the title and the post in this language, whatever
+             try {
+               return (
+                 (
+-                  await openai.chat.completions.parse({
+-                    model: 'gpt-4.1',
++                  await textOpenai.chat.completions.parse({
++                    model: textModel,
+                     messages: [
+                       {
+                         role: 'system',
+@@ -290,8 +301,8 @@ Clips must not overlap. Write the title and the post in this language, whatever
+         const message = `You are an assistant that takes a text and break it into slides, each slide should have an image prompt and voice text to be later used to generate a video and voice, image prompt should capture the essence of the slide and also have a back dark gradient on top, image prompt should not contain text in the picture, generate between 3-5 slides maximum`;
+         const parse =
+           (
+-            await openai.chat.completions.parse({
+-              model: 'gpt-4.1',
++            await textOpenai.chat.completions.parse({
++              model: textModel,
+               messages: [
+                 {
+                   role: 'system',
+-- 
+2.53.0
+
+From 0922402195672319c270f6521862dabeac80ffbb Mon Sep 17 00:00:00 2001
+From: cloud9-postiz-builder <root@cloud9.local>
+Date: Mon, 21 Sep 2026 23:26:01 +0200
+Subject: [PATCH] feat: route Postiz image generation through configurable
+ endpoint
+
+---
+ .../src/agent/agent.graph.service.ts          | 10 +-
+ .../prisma/autopost/autopost.service.ts       | 12 +--
+ .../src/openai/image.generator.ts             | 99 +++++++++++++++++++
+ .../src/openai/openai.service.ts              | 17 +---
+ 4 files changed, 108 insertions(+), 30 deletions(-)
+ create mode 100644 libraries/nestjs-libraries/src/openai/image.generator.ts
+
+diff --git a/libraries/nestjs-libraries/src/agent/agent.graph.service.ts b/libraries/nestjs-libraries/src/agent/agent.graph.service.ts
+index f1a8844..326596e 100644
+--- a/libraries/nestjs-libraries/src/agent/agent.graph.service.ts
++++ b/libraries/nestjs-libraries/src/agent/agent.graph.service.ts
+@@ -5,7 +5,8 @@ import {
+   ToolMessage,
+ } from '@langchain/core/messages';
+ import { END, START, StateGraph } from '@langchain/langgraph';
+-import { ChatOpenAI, DallEAPIWrapper } from '@langchain/openai';
++import { ChatOpenAI } from '@langchain/openai';
++import { generateImageSource } from '@gitroom/nestjs-libraries/openai/image.generator';
+ import { TavilySearch } from '@langchain/tavily';
+ import { ToolNode } from '@langchain/langgraph/prebuilt';
+ import { ChatPromptTemplate } from '@langchain/core/prompts';
+@@ -34,11 +35,6 @@ const model = new ChatOpenAI({
+   temperature: 0.7,
+ });
+ 
+-const dalle = new DallEAPIWrapper({
+-  apiKey: process.env.OPENAI_API_KEY || 'sk-proj-',
+-  model: 'chatgpt-image-latest',
+-});
+-
+ interface WorkflowChannelsState {
+   messages: BaseMessage[];
+   orgId: string;
+@@ -328,7 +324,7 @@ export class AgentGraphService {
+     try {
+       const newContent = await Promise.all(
+         (state.content || []).map(async (p) => {
+-          const image = await dalle.invoke(p.prompt!);
++          const image = await generateImageSource(p.prompt!);
+           return {
+             ...p,
+             image,
+diff --git a/libraries/nestjs-libraries/src/database/prisma/autopost/autopost.service.ts b/libraries/nestjs-libraries/src/database/prisma/autopost/autopost.service.ts
+index 05dbf28..5bfe0d0 100644
+--- a/libraries/nestjs-libraries/src/database/prisma/autopost/autopost.service.ts
++++ b/libraries/nestjs-libraries/src/database/prisma/autopost/autopost.service.ts
+@@ -6,7 +6,8 @@ import { END, START, StateGraph } from '@langchain/langgraph';
+ import { AutoPost, Integration } from '@prisma/client';
+ import { BaseMessage } from '@langchain/core/messages';
+ import striptags from 'striptags';
+-import { ChatOpenAI, DallEAPIWrapper } from '@langchain/openai';
++import { ChatOpenAI } from '@langchain/openai';
++import { generateImageSource } from '@gitroom/nestjs-libraries/openai/image.generator';
+ import { JSDOM } from 'jsdom';
+ import { z } from 'zod';
+ import { ChatPromptTemplate } from '@langchain/core/prompts';
+@@ -47,11 +48,6 @@ const model = new ChatOpenAI({
+   temperature: 0.7,
+ });
+ 
+-const dalle = new DallEAPIWrapper({
+-  apiKey: process.env.OPENAI_API_KEY || 'sk-proj-',
+-  model: 'chatgpt-image-latest',
+-});
+-
+ const generateContent = z.object({
+   socialMediaPostContent: z
+     .string()
+@@ -252,7 +248,7 @@ export class AutopostService {
+     const { generatedTextToBeSentToDallE } =
+       await ChatPromptTemplate.fromTemplate(
+         `
+-        You are an assistant that gets description and generate a prompt that will be sent to DallE to generate pictures.
++        You are an assistant that gets a description and generates a prompt for an image-generation model.
+         
+         content:
+         {content}
+@@ -263,7 +259,7 @@ export class AutopostService {
+           content: state.load.description || state.description,
+         });
+ 
+-    const image = await dalle.invoke(generatedTextToBeSentToDallE);
++    const image = await generateImageSource(generatedTextToBeSentToDallE);
+ 
+     return { ...state, image };
+   }
+diff --git a/libraries/nestjs-libraries/src/openai/image.generator.ts b/libraries/nestjs-libraries/src/openai/image.generator.ts
+new file mode 100644
+index 0000000..2d8de87
+--- /dev/null
++++ b/libraries/nestjs-libraries/src/openai/image.generator.ts
+@@ -0,0 +1,99 @@
++import OpenAI from 'openai';
++
++const imageApiKey =
++  process.env.POSTIZ_IMAGE_API_KEY ||
++  process.env.OPENAI_API_KEY ||
++  'sk-proj-';
++const imageBaseUrl =
++  process.env.POSTIZ_IMAGE_BASE_URL || process.env.OPENAI_BASE_URL;
++const imageModel =
++  process.env.POSTIZ_IMAGE_MODEL || 'chatgpt-image-latest';
++
++const imageClient = new OpenAI({
++  apiKey: imageApiKey,
++  ...(imageBaseUrl ? { baseURL: imageBaseUrl } : {}),
++});
++
++type GeneratedImage = {
++  b64_json?: string | null;
++  url?: string | null;
++};
++
++function detectImageMime(base64: string): string {
++  const bytes = Buffer.from(base64, 'base64');
++  if (bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
++    return 'image/png';
++  }
++  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
++    return 'image/jpeg';
++  }
++  if (bytes.length >= 12 && bytes.subarray(0, 4).toString('ascii') === 'RIFF' && bytes.subarray(8, 12).toString('ascii') === 'WEBP') {
++    return 'image/webp';
++  }
++  if (bytes.length >= 6 && (bytes.subarray(0, 6).toString('ascii') === 'GIF87a' || bytes.subarray(0, 6).toString('ascii') === 'GIF89a')) {
++    return 'image/gif';
++  }
++  return 'image/png';
++}
++
++async function generate(
++  prompt: string,
++  isVertical = false
++): Promise<GeneratedImage> {
++  // Some Gemini image backends can occasionally return a successful HTTP
++  // response with an empty image list. Retry that specific transient once;
++  // real provider errors are already handled/fail-overed by OmniRoute.
++  for (let attempt = 0; attempt < 2; attempt += 1) {
++    const response = await imageClient.images.generate({
++      prompt,
++      model: imageModel,
++      size: isVertical ? '1024x1536' : '1024x1024',
++      response_format: 'b64_json',
++    } as any);
++
++    const rawResponse = response as unknown as
++      | { data?: GeneratedImage[] }
++      | GeneratedImage[];
++    const images = Array.isArray(rawResponse) ? rawResponse : rawResponse.data;
++    const image = images?.[0];
++    if (image) {
++      return image;
++    }
++  }
++
++  throw new Error('Image generation returned no image after one retry.');
++}
++
++export async function generateImageBase64(
++  prompt: string,
++  isVertical = false
++): Promise<string> {
++  const image = await generate(prompt, isVertical);
++  if (image.b64_json) {
++    return image.b64_json;
++  }
++  if (image.url) {
++    const response = await fetch(image.url);
++    if (!response.ok) {
++      throw new Error(
++        'Image generation URL fetch failed (' + response.status + ').'
++      );
++    }
++    return Buffer.from(await response.arrayBuffer()).toString('base64');
++  }
++  throw new Error('Image generation returned neither base64 nor URL.');
++}
++
++export async function generateImageSource(
++  prompt: string,
++  isVertical = false
++): Promise<string> {
++  const image = await generate(prompt, isVertical);
++  if (image.b64_json) {
++    return 'data:' + detectImageMime(image.b64_json) + ';base64,' + image.b64_json;
++  }
++  if (image.url) {
++    return image.url;
++  }
++  throw new Error('Image generation returned neither base64 nor URL.');
++}
+diff --git a/libraries/nestjs-libraries/src/openai/openai.service.ts b/libraries/nestjs-libraries/src/openai/openai.service.ts
+index 6ebcc03..5d3795f 100644
+--- a/libraries/nestjs-libraries/src/openai/openai.service.ts
++++ b/libraries/nestjs-libraries/src/openai/openai.service.ts
+@@ -1,13 +1,10 @@
+ import { Injectable } from '@nestjs/common';
+ import OpenAI from 'openai';
++import { generateImageBase64 } from '@gitroom/nestjs-libraries/openai/image.generator';
+ import { shuffle } from 'lodash';
+ import { zodResponseFormat } from 'openai/helpers/zod';
+ import { z } from 'zod';
+ 
+-const imageOpenai = new OpenAI({
+-  apiKey: process.env.OPENAI_API_KEY || 'sk-proj-',
+-});
+-
+ const textOpenai = new OpenAI({
+   apiKey:
+     process.env.POSTIZ_LLM_API_KEY ||
+@@ -87,17 +84,7 @@ Clips must not overlap. Write the title and the post in this language, whatever
+   }
+ 
+   async generateImage(prompt: string, isVertical = false) {
+-    // gpt-image models always return base64 (b64_json) and do not accept the
+-    // `response_format` parameter, unlike the deprecated dall-e-3.
+-    const generate = (
+-      await imageOpenai.images.generate({
+-        prompt,
+-        model: 'chatgpt-image-latest',
+-        size: isVertical ? '1024x1536' : '1024x1024',
+-      })
+-    ).data[0];
+-
+-    return generate.b64_json;
++    return generateImageBase64(prompt, isVertical);
+   }
+ 
+   async generatePromptForPicture(prompt: string) {
+-- 
+2.53.0
+
+From 9f5e038a48bf143e2f3acf23707f40840467b137 Mon Sep 17 00:00:00 2001
+From: cloud9-postiz-builder <root@cloud9.local>
+Date: Thu, 24 Sep 2026 01:43:06 +0200
+Subject: [PATCH] fix: route remaining text parse through configured LLM
+
+---
+ libraries/nestjs-libraries/src/openai/openai.service.ts | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/libraries/nestjs-libraries/src/openai/openai.service.ts b/libraries/nestjs-libraries/src/openai/openai.service.ts
+index 5d3795f..dfc445b 100644
+--- a/libraries/nestjs-libraries/src/openai/openai.service.ts
++++ b/libraries/nestjs-libraries/src/openai/openai.service.ts
+@@ -48,7 +48,7 @@ export class OpenaiService {
+     maxClips: number
+   ) {
+     const { clips } = (
+-      await openai.chat.completions.parse(
++      await textOpenai.chat.completions.parse(
+         {
+           model: 'gpt-4.1',
+           messages: [
+-- 
+2.53.0
+

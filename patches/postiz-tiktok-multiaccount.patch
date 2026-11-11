@@ -1,0 +1,24 @@
+From 9ba6e909d87713bd8ca58e79b5127d696f9f8331 Mon Sep 17 00:00:00 2001
+From: cloud9-postiz-builder <root@cloud9.local>
+Date: Tue, 29 Sep 2026 11:10:40 +0200
+Subject: [PATCH] fix: force TikTok account chooser for multi-account OAuth
+
+---
+ .../nestjs-libraries/src/integrations/social/tiktok.provider.ts  | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/libraries/nestjs-libraries/src/integrations/social/tiktok.provider.ts b/libraries/nestjs-libraries/src/integrations/social/tiktok.provider.ts
+index 1360050..4d82560 100644
+--- a/libraries/nestjs-libraries/src/integrations/social/tiktok.provider.ts
++++ b/libraries/nestjs-libraries/src/integrations/social/tiktok.provider.ts
+@@ -354,6 +354,7 @@ export class TiktokProvider extends SocialAbstract implements SocialProvider {
+         )}` +
+         `&state=${state}` +
+         `&response_type=code` +
++        `&disable_auto_auth=1` +
+         `&scope=${encodeURIComponent(this.scopes.join(','))}`,
+       codeVerifier: state,
+       state,
+-- 
+2.53.0
+

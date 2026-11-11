@@ -1,0 +1,964 @@
+From cb4200637fd5709b3598537c6cd545ff841a3abc Mon Sep 17 00:00:00 2001
+From: cloud9-postiz-builder <root@cloud9.local>
+Date: Sat, 26 Sep 2026 15:41:08 +0200
+Subject: [PATCH 1/6] feat: autonomous local media workflow for Postiz agent
+
+---
+ .../src/chat/load.tools.service.ts            |  6 +-
+ .../src/chat/tools/local.media.path.ts        | 21 +++++++
+ .../src/chat/tools/next.posting.slot.tool.ts  | 36 +++++++++++
+ .../src/chat/tools/tool.list.ts               |  6 ++
+ .../chat/tools/transcribe.local.media.tool.ts | 61 +++++++++++++++++++
+ .../src/chat/tools/upload.local.media.tool.ts | 58 ++++++++++++++++++
+ 6 files changed, 187 insertions(+), 1 deletion(-)
+ create mode 100644 libraries/nestjs-libraries/src/chat/tools/local.media.path.ts
+ create mode 100644 libraries/nestjs-libraries/src/chat/tools/next.posting.slot.tool.ts
+ create mode 100644 libraries/nestjs-libraries/src/chat/tools/transcribe.local.media.tool.ts
+ create mode 100644 libraries/nestjs-libraries/src/chat/tools/upload.local.media.tool.ts
+
+diff --git a/libraries/nestjs-libraries/src/chat/load.tools.service.ts b/libraries/nestjs-libraries/src/chat/load.tools.service.ts
+index dcc2a85..07e95d1 100644
+--- a/libraries/nestjs-libraries/src/chat/load.tools.service.ts
++++ b/libraries/nestjs-libraries/src/chat/load.tools.service.ts
+@@ -84,7 +84,11 @@ export class LoadToolsService {
+       - Always make sure you use this tool before you schedule any post.
+       - In every message I will send you the list of needed social medias (id and platform), if you already have the information use it, if not, use the integrationSchema tool to get it.
+       - Make sure you always take the last information I give you about the socials, it might have changed.
+-      - Before scheduling a post, always make sure you ask the user confirmation by providing all the details of the post (text, images, videos, date, time, social media platform, account).
++      - Before scheduling a post, ask for confirmation only when the user has not already explicitly instructed you to publish or schedule it in the current request. An explicit imperative such as publish, schedule, or post this today counts as confirmation; do not ask twice.
++      - When the user gives a local filesystem path and uploadLocalMediaTool is available, import it with uploadLocalMediaTool before scheduling. Never pass a raw filesystem path as an attachment.
++      - For a local video or audio file, use transcribeLocalMediaTool before writing the caption or description so your copy is grounded in the actual spoken content.
++      - If the user asks you to match or reference another connected account recent style, inspect recent posts with postsListTool and use the latest relevant published post as a style reference without copying it verbatim.
++      - When the user asks for the next or best configured posting time and did not give an exact clock time, use nextPostingSlotTool for the target channel instead of inventing a time.
+       - To find or inspect existing posts, use postsListTool with a UTC start and end date - it returns every post scheduled in that window. To cover "all my upcoming posts", pass a wide window starting now.
+       - To change the provider settings of an existing post that was not published yet (scheduled or draft), first find it with postsListTool, then use postSettingsTool with the post's id. It only updates the settings - the content and the publish date stay as they are - and only the keys you pass are changed (get them with the integrationSchema tool). Show the user which post and which settings will change and get their confirmation first.
+       - Never open the "modal with populated content" to edit an existing post - that modal only CREATES a new post, so using it to edit would duplicate the post. It is only for brand new posts.
+diff --git a/libraries/nestjs-libraries/src/chat/tools/local.media.path.ts b/libraries/nestjs-libraries/src/chat/tools/local.media.path.ts
+new file mode 100644
+index 0000000..bda7bc5
+--- /dev/null
++++ b/libraries/nestjs-libraries/src/chat/tools/local.media.path.ts
+@@ -0,0 +1,21 @@
++import path from 'path';
++import { realpath, stat } from 'fs/promises';
++
++export async function resolveAllowedLocalMediaPath(inputPath: string) {
++  const configuredRoot = process.env.POSTIZ_LOCAL_MEDIA_ROOT?.trim();
++  if (!configuredRoot) {
++    throw new Error('Local media ingestion is not configured.');
++  }
++  const root = await realpath(configuredRoot);
++  const candidate = path.isAbsolute(inputPath) ? inputPath : path.join(root, inputPath);
++  const resolved = await realpath(candidate);
++  const rootPrefix = root.endsWith(path.sep) ? root : root + path.sep;
++  if (resolved !== root && !resolved.startsWith(rootPrefix)) {
++    throw new Error('Path is outside the allowed local media root.');
++  }
++  const info = await stat(resolved);
++  if (!info.isFile()) {
++    throw new Error('Path is not a regular file.');
++  }
++  return { path: resolved, originalName: path.basename(resolved), size: info.size };
++}
+diff --git a/libraries/nestjs-libraries/src/chat/tools/next.posting.slot.tool.ts b/libraries/nestjs-libraries/src/chat/tools/next.posting.slot.tool.ts
+new file mode 100644
+index 0000000..cbe677b
+--- /dev/null
++++ b/libraries/nestjs-libraries/src/chat/tools/next.posting.slot.tool.ts
+@@ -0,0 +1,36 @@
++import { AgentToolInterface } from '@gitroom/nestjs-libraries/chat/agent.tool.interface';
++import { createTool } from '@mastra/core/tools';
++import { z } from 'zod';
++import { Injectable } from '@nestjs/common';
++import { PostsService } from '@gitroom/nestjs-libraries/database/prisma/posts/posts.service';
++import { checkAuth } from '@gitroom/nestjs-libraries/chat/auth.context';
++
++@Injectable()
++export class NextPostingSlotTool implements AgentToolInterface {
++  constructor(private _postsService: PostsService) {}
++  name = 'nextPostingSlotTool';
++
++  run() {
++    return createTool({
++      id: 'nextPostingSlotTool',
++      description: 'Return the next free configured Postiz posting slot in UTC. Pass an integrationId to use that channel posting schedule. Use this when the user asks for the next or best configured posting time instead of inventing a clock time.',
++      inputSchema: z.object({ integrationId: z.string().optional() }),
++      outputSchema: z.object({
++        date: z.string().optional(),
++        error: z.string().optional(),
++      }),
++      execute: async (inputData, context) => {
++        checkAuth(inputData, context);
++        try {
++          const org = JSON.parse((context?.requestContext as any)?.get('organization') as string);
++          return {
++            date: await this._postsService.findFreeDateTime(org.id, inputData.integrationId),
++          };
++        } catch (err) {
++          const message = err instanceof Error ? err.message : String(err);
++          return { error: 'Failed to find a posting slot: ' + message };
++        }
++      },
++    });
++  }
++}
+diff --git a/libraries/nestjs-libraries/src/chat/tools/tool.list.ts b/libraries/nestjs-libraries/src/chat/tools/tool.list.ts
+index 0176680..c584194 100644
+--- a/libraries/nestjs-libraries/src/chat/tools/tool.list.ts
++++ b/libraries/nestjs-libraries/src/chat/tools/tool.list.ts
+@@ -17,6 +17,9 @@ import { PostSettingsTool } from '@gitroom/nestjs-libraries/chat/tools/post.sett
+ import { UploadWidgetTool } from '@gitroom/nestjs-libraries/chat/tools/upload.widget.tool';
+ import { UploadWidgetTicketTool } from '@gitroom/nestjs-libraries/chat/tools/upload.widget.ticket.tool';
+ import { UploadWidgetStatusTool } from '@gitroom/nestjs-libraries/chat/tools/upload.widget.status.tool';
++import { UploadLocalMediaTool } from '@gitroom/nestjs-libraries/chat/tools/upload.local.media.tool';
++import { TranscribeLocalMediaTool } from '@gitroom/nestjs-libraries/chat/tools/transcribe.local.media.tool';
++import { NextPostingSlotTool } from '@gitroom/nestjs-libraries/chat/tools/next.posting.slot.tool';
+ 
+ export const toolList = [
+   IntegrationListTool,
+@@ -35,6 +38,9 @@ export const toolList = [
+   ClippingWidgetTicketTool,
+   GenerateImageTool,
+   UploadFromUrlTool,
++  UploadLocalMediaTool,
++  TranscribeLocalMediaTool,
++  NextPostingSlotTool,
+   UploadWidgetTool,
+   UploadWidgetTicketTool,
+   UploadWidgetStatusTool,
+diff --git a/libraries/nestjs-libraries/src/chat/tools/transcribe.local.media.tool.ts b/libraries/nestjs-libraries/src/chat/tools/transcribe.local.media.tool.ts
+new file mode 100644
+index 0000000..fa9a459
+--- /dev/null
++++ b/libraries/nestjs-libraries/src/chat/tools/transcribe.local.media.tool.ts
+@@ -0,0 +1,61 @@
++import { AgentToolInterface } from '@gitroom/nestjs-libraries/chat/agent.tool.interface';
++import { createTool } from '@mastra/core/tools';
++import { z } from 'zod';
++import { Injectable } from '@nestjs/common';
++import { createReadStream } from 'fs';
++import axios from 'axios';
++import { checkAuth } from '@gitroom/nestjs-libraries/chat/auth.context';
++import { resolveAllowedLocalMediaPath } from '@gitroom/nestjs-libraries/chat/tools/local.media.path';
++
++@Injectable()
++export class TranscribeLocalMediaTool implements AgentToolInterface {
++  name = 'transcribeLocalMediaTool';
++
++  available() {
++    return !!process.env.POSTIZ_LOCAL_MEDIA_ROOT && !!process.env.POSTIZ_SPEACHES_URL;
++  }
++
++  run() {
++    return createTool({
++      id: 'transcribeLocalMediaTool',
++      description: 'Transcribe a local production video or audio file with the configured self-hosted Speaches server. Use this before writing captions or descriptions for a local video so the copy is grounded in what is actually said.',
++      inputSchema: z.object({
++        path: z.string().min(1).describe('Absolute or root-relative local media path'),
++        language: z.string().optional().describe('ISO language code, defaults to configured language'),
++      }),
++      outputSchema: z.object({
++        text: z.string().optional(),
++        error: z.string().optional(),
++      }),
++      execute: async (inputData, context) => {
++        checkAuth(inputData, context);
++        try {
++          const local = await resolveAllowedLocalMediaPath(inputData.path);
++          const base = process.env.POSTIZ_SPEACHES_URL!.replace(/\/+$/, '');
++          const model = process.env.POSTIZ_SPEACHES_MODEL || 'deepdml/faster-whisper-large-v3-turbo-ct2';
++          const language = inputData.language || process.env.POSTIZ_SPEACHES_LANGUAGE || 'fr';
++          const response = await axios.postForm(
++            base + '/v1/audio/transcriptions',
++            {
++              file: createReadStream(local.path),
++              model,
++              language,
++              response_format: 'json',
++            },
++            {
++              timeout: Number(process.env.POSTIZ_SPEACHES_TIMEOUT_MS || 900000),
++              maxBodyLength: Infinity,
++              maxContentLength: 16 * 1024 * 1024,
++            }
++          );
++          const text = String(response.data?.text || '').trim();
++          if (!text) throw new Error('Speaches returned an empty transcript.');
++          return { text };
++        } catch (err) {
++          const message = err instanceof Error ? err.message : String(err);
++          return { error: 'Failed to transcribe local media: ' + message };
++        }
++      },
++    });
++  }
++}
+diff --git a/libraries/nestjs-libraries/src/chat/tools/upload.local.media.tool.ts b/libraries/nestjs-libraries/src/chat/tools/upload.local.media.tool.ts
+new file mode 100644
+index 0000000..7fa959b
+--- /dev/null
++++ b/libraries/nestjs-libraries/src/chat/tools/upload.local.media.tool.ts
+@@ -0,0 +1,58 @@
++import { AgentToolInterface } from '@gitroom/nestjs-libraries/chat/agent.tool.interface';
++import { createTool } from '@mastra/core/tools';
++import { z } from 'zod';
++import { Injectable } from '@nestjs/common';
++import { createReadStream } from 'fs';
++import { Readable } from 'stream';
++import { MediaService } from '@gitroom/nestjs-libraries/database/prisma/media/media.service';
++import { checkAuth } from '@gitroom/nestjs-libraries/chat/auth.context';
++import { UploadFactory } from '@gitroom/nestjs-libraries/upload/upload.factory';
++import { uploadStreamToStorage } from '@gitroom/nestjs-libraries/upload/custom.upload.validation';
++import { resolveAllowedLocalMediaPath } from '@gitroom/nestjs-libraries/chat/tools/local.media.path';
++
++@Injectable()
++export class UploadLocalMediaTool implements AgentToolInterface {
++  constructor(private _mediaService: MediaService) {}
++  name = 'uploadLocalMediaTool';
++  private storage = UploadFactory.createStorage();
++
++  available() {
++    return !!process.env.POSTIZ_LOCAL_MEDIA_ROOT;
++  }
++
++  run() {
++    return createTool({
++      id: 'uploadLocalMediaTool',
++      description: 'Import an image or MP4 video from the self-hosted server filesystem into the Postiz media library. Use this when the user gives a local path under the configured production-media root. The source is read-only and never moved or modified. Returns the Postiz-hosted media id and path that must be used as the attachment when scheduling.',
++      inputSchema: z.object({
++        path: z.string().min(1).describe('Absolute or root-relative local media path'),
++      }),
++      outputSchema: z.object({
++        id: z.string().optional(),
++        path: z.string().optional(),
++        originalName: z.string().optional(),
++        error: z.string().optional(),
++      }),
++      execute: async (inputData, context) => {
++        checkAuth(inputData, context);
++        try {
++          const org = JSON.parse((context?.requestContext as any)?.get('organization') as string);
++          const local = await resolveAllowedLocalMediaPath(inputData.path);
++          const nodeStream = createReadStream(local.path);
++          const webStream = Readable.toWeb(nodeStream) as any;
++          const uploaded = await uploadStreamToStorage(this.storage, webStream, local.size);
++          const media = await this._mediaService.saveFile(
++            org.id,
++            uploaded.filename,
++            uploaded.path,
++            local.originalName
++          );
++          return { id: media.id, path: media.path, originalName: local.originalName };
++        } catch (err) {
++          const message = err instanceof Error ? err.message : String(err);
++          return { error: 'Failed to import local media: ' + message };
++        }
++      },
++    });
++  }
++}
+-- 
+2.53.0
+
+
+From 4397fa9ebc788935100e43133468f60dea10654a Mon Sep 17 00:00:00 2001
+From: cloud9-postiz-builder <root@cloud9.local>
+Date: Sat, 26 Sep 2026 17:44:47 +0200
+Subject: [PATCH 2/6] fix: make Postiz agent exhaust integration results
+
+---
+ libraries/nestjs-libraries/src/chat/load.tools.service.ts | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/libraries/nestjs-libraries/src/chat/load.tools.service.ts b/libraries/nestjs-libraries/src/chat/load.tools.service.ts
+index 07e95d1..e1aadc4 100644
+--- a/libraries/nestjs-libraries/src/chat/load.tools.service.ts
++++ b/libraries/nestjs-libraries/src/chat/load.tools.service.ts
+@@ -89,6 +89,7 @@ export class LoadToolsService {
+       - For a local video or audio file, use transcribeLocalMediaTool before writing the caption or description so your copy is grounded in the actual spoken content.
+       - If the user asks you to match or reference another connected account recent style, inspect recent posts with postsListTool and use the latest relevant published post as a style reference without copying it verbatim.
+       - When the user asks for the next or best configured posting time and did not give an exact clock time, use nextPostingSlotTool for the target channel instead of inventing a time.
++      - When reading integrationList results, inspect the entire output array and filter by the exact platform field. Never report that a requested platform has no connected channel if a matching entry exists anywhere in the tool result. For a multi-platform request, handle every requested platform before finishing.
+       - To find or inspect existing posts, use postsListTool with a UTC start and end date - it returns every post scheduled in that window. To cover "all my upcoming posts", pass a wide window starting now.
+       - To change the provider settings of an existing post that was not published yet (scheduled or draft), first find it with postsListTool, then use postSettingsTool with the post's id. It only updates the settings - the content and the publish date stay as they are - and only the keys you pass are changed (get them with the integrationSchema tool). Show the user which post and which settings will change and get their confirmation first.
+       - Never open the "modal with populated content" to edit an existing post - that modal only CREATES a new post, so using it to edit would duplicate the post. It is only for brand new posts.
+-- 
+2.53.0
+
+
+From 13c0ca366678aded8d9c7c1670cf1f4dafb1f429 Mon Sep 17 00:00:00 2001
+From: cloud9-postiz-builder <root@cloud9.local>
+Date: Sat, 26 Sep 2026 18:34:49 +0200
+Subject: [PATCH 3/6] feat: adaptive scheduling analytics and backend self-heal
+
+---
+ .../src/chat/load.tools.service.ts            |   4 +
+ .../src/chat/tools/analytics.tool.ts          |  95 +++++++++++
+ .../src/chat/tools/next.posting.slot.tool.ts  | 152 +++++++++++++++++-
+ .../src/chat/tools/set.posting.times.tool.ts  |  77 +++++++++
+ .../src/chat/tools/tool.list.ts               |   5 +
+ package.json                                  |   2 +-
+ scripts/backend-health-guard.cjs              |  62 +++++++
+ 7 files changed, 391 insertions(+), 6 deletions(-)
+ create mode 100644 libraries/nestjs-libraries/src/chat/tools/analytics.tool.ts
+ create mode 100644 libraries/nestjs-libraries/src/chat/tools/set.posting.times.tool.ts
+ create mode 100644 scripts/backend-health-guard.cjs
+
+diff --git a/libraries/nestjs-libraries/src/chat/load.tools.service.ts b/libraries/nestjs-libraries/src/chat/load.tools.service.ts
+index e1aadc4..0969b96 100644
+--- a/libraries/nestjs-libraries/src/chat/load.tools.service.ts
++++ b/libraries/nestjs-libraries/src/chat/load.tools.service.ts
+@@ -89,6 +89,10 @@ export class LoadToolsService {
+       - For a local video or audio file, use transcribeLocalMediaTool before writing the caption or description so your copy is grounded in the actual spoken content.
+       - If the user asks you to match or reference another connected account recent style, inspect recent posts with postsListTool and use the latest relevant published post as a style reference without copying it verbatim.
+       - When the user asks for the next or best configured posting time and did not give an exact clock time, use nextPostingSlotTool for the target channel instead of inventing a time.
++      - For a YouTube Short or short social clip, call nextPostingSlotTool with contentType=short; use contentType=long only for long-form YouTube.
++      - The timing policy is generic for the creator and content format. Never change the schedule based on a political viewpoint, party, candidate, or political topic.
++      - When asked about real performance, use channelAnalyticsTool or postAnalyticsTool rather than guessing from generic social-media advice.
++      - setPostingTimesTool changes only the native daily fallback times. Use it only after an explicit request to change scheduling configuration; nextPostingSlotTool remains the source of truth for best weekday/time selection.
+       - When reading integrationList results, inspect the entire output array and filter by the exact platform field. Never report that a requested platform has no connected channel if a matching entry exists anywhere in the tool result. For a multi-platform request, handle every requested platform before finishing.
+       - To find or inspect existing posts, use postsListTool with a UTC start and end date - it returns every post scheduled in that window. To cover "all my upcoming posts", pass a wide window starting now.
+       - To change the provider settings of an existing post that was not published yet (scheduled or draft), first find it with postsListTool, then use postSettingsTool with the post's id. It only updates the settings - the content and the publish date stay as they are - and only the keys you pass are changed (get them with the integrationSchema tool). Show the user which post and which settings will change and get their confirmation first.
+diff --git a/libraries/nestjs-libraries/src/chat/tools/analytics.tool.ts b/libraries/nestjs-libraries/src/chat/tools/analytics.tool.ts
+new file mode 100644
+index 0000000..5876b3e
+--- /dev/null
++++ b/libraries/nestjs-libraries/src/chat/tools/analytics.tool.ts
+@@ -0,0 +1,95 @@
++import { AgentToolInterface } from '@gitroom/nestjs-libraries/chat/agent.tool.interface';
++import { createTool } from '@mastra/core/tools';
++import { z } from 'zod';
++import { Injectable } from '@nestjs/common';
++import { IntegrationService } from '@gitroom/nestjs-libraries/database/prisma/integrations/integration.service';
++import { PostsService } from '@gitroom/nestjs-libraries/database/prisma/posts/posts.service';
++import { checkAuth } from '@gitroom/nestjs-libraries/chat/auth.context';
++
++@Injectable()
++export class ChannelAnalyticsTool implements AgentToolInterface {
++  constructor(private _integrationService: IntegrationService) {}
++  name = 'channelAnalyticsTool';
++
++  run() {
++    return createTool({
++      id: 'channelAnalyticsTool',
++      description:
++        'Fetch live provider analytics for a connected channel over the requested number of days. Use this before making claims about the channel actual performance.',
++      inputSchema: z.object({
++        integrationId: z.string().min(1),
++        days: z.number().int().min(1).max(365).optional().default(30),
++      }),
++      outputSchema: z.object({
++        output: z.any(),
++        error: z.string().optional(),
++      }),
++      execute: async (inputData, context) => {
++        checkAuth(inputData, context);
++        try {
++          const org = JSON.parse(
++            (context?.requestContext as any)?.get('organization') as string
++          );
++          return {
++            output: await this._integrationService.checkAnalytics(
++              org,
++              inputData.integrationId,
++              String(inputData.days)
++            ),
++          };
++        } catch (err) {
++          return {
++            output: [],
++            error:
++              'Failed to fetch channel analytics: ' +
++              (err instanceof Error ? err.message : String(err)),
++          };
++        }
++      },
++    });
++  }
++}
++
++@Injectable()
++export class PostAnalyticsTool implements AgentToolInterface {
++  constructor(private _postsService: PostsService) {}
++  name = 'postAnalyticsTool';
++
++  run() {
++    return createTool({
++      id: 'postAnalyticsTool',
++      description:
++        'Fetch live provider analytics for a published Postiz post. Use this to compare real post performance such as Instagram views/reach/shares/saves or YouTube views/likes/comments.',
++      inputSchema: z.object({
++        postId: z.string().min(1),
++        days: z.number().int().min(1).max(365).optional().default(30),
++      }),
++      outputSchema: z.object({
++        output: z.any(),
++        error: z.string().optional(),
++      }),
++      execute: async (inputData, context) => {
++        checkAuth(inputData, context);
++        try {
++          const orgId = JSON.parse(
++            (context?.requestContext as any)?.get('organization') as string
++          ).id;
++          return {
++            output: await this._postsService.checkPostAnalytics(
++              orgId,
++              inputData.postId,
++              inputData.days
++            ),
++          };
++        } catch (err) {
++          return {
++            output: [],
++            error:
++              'Failed to fetch post analytics: ' +
++              (err instanceof Error ? err.message : String(err)),
++          };
++        }
++      },
++    });
++  }
++}
+diff --git a/libraries/nestjs-libraries/src/chat/tools/next.posting.slot.tool.ts b/libraries/nestjs-libraries/src/chat/tools/next.posting.slot.tool.ts
+index cbe677b..4fc7cc9 100644
+--- a/libraries/nestjs-libraries/src/chat/tools/next.posting.slot.tool.ts
++++ b/libraries/nestjs-libraries/src/chat/tools/next.posting.slot.tool.ts
+@@ -3,28 +3,170 @@ import { createTool } from '@mastra/core/tools';
+ import { z } from 'zod';
+ import { Injectable } from '@nestjs/common';
+ import { PostsService } from '@gitroom/nestjs-libraries/database/prisma/posts/posts.service';
++import { IntegrationService } from '@gitroom/nestjs-libraries/database/prisma/integrations/integration.service';
+ import { checkAuth } from '@gitroom/nestjs-libraries/chat/auth.context';
++import { readFile } from 'fs/promises';
++import dayjs from 'dayjs';
++import utc from 'dayjs/plugin/utc';
++import timezone from 'dayjs/plugin/timezone';
++
++dayjs.extend(utc);
++dayjs.extend(timezone);
++
++type Slot = { day: number; time: string; weight?: number };
++type Policy = {
++  timezone?: string;
++  platforms?: Record<string, Record<string, Slot[]>>;
++};
++
++const loadPolicy = async (): Promise<Policy | null> => {
++  const policyPath =
++    process.env.POSTIZ_OPTIMAL_SCHEDULE_PATH ||
++    '/config/optimal-posting-schedule.json';
++  try {
++    return JSON.parse(await readFile(policyPath, 'utf8')) as Policy;
++  } catch {
++    return null;
++  }
++};
+ 
+ @Injectable()
+ export class NextPostingSlotTool implements AgentToolInterface {
+-  constructor(private _postsService: PostsService) {}
++  constructor(
++    private _postsService: PostsService,
++    private _integrationService: IntegrationService
++  ) {}
+   name = 'nextPostingSlotTool';
+ 
+   run() {
+     return createTool({
+       id: 'nextPostingSlotTool',
+-      description: 'Return the next free configured Postiz posting slot in UTC. Pass an integrationId to use that channel posting schedule. Use this when the user asks for the next or best configured posting time instead of inventing a clock time.',
+-      inputSchema: z.object({ integrationId: z.string().optional() }),
++      description:
++        'Return the next high-quality free posting slot for a channel using the persistent weekly Europe/Paris schedule. For YouTube use contentType=short for Shorts/clips and long for long-form. The timing policy is generic to the creator/content format and must not be changed based on a political viewpoint or political topic. Falls back to native Postiz slots if no weekly policy exists.',
++      inputSchema: z.object({
++        integrationId: z.string().min(1),
++        contentType: z
++          .enum(['default', 'short', 'long'])
++          .optional()
++          .default('default'),
++      }),
+       outputSchema: z.object({
+         date: z.string().optional(),
++        localDate: z.string().optional(),
++        timezone: z.string().optional(),
++        platform: z.string().optional(),
++        source: z.string().optional(),
++        alternatives: z.array(z.string()).optional(),
+         error: z.string().optional(),
+       }),
+       execute: async (inputData, context) => {
+         checkAuth(inputData, context);
+         try {
+-          const org = JSON.parse((context?.requestContext as any)?.get('organization') as string);
++          const org = JSON.parse(
++            (context?.requestContext as any)?.get('organization') as string
++          );
++          const integration = await this._integrationService.getIntegrationById(
++            org.id,
++            inputData.integrationId
++          );
++          if (!integration) {
++            return { error: 'Channel not found.' };
++          }
++
++          const policy = await loadPolicy();
++          const zone = policy?.timezone || 'Europe/Paris';
++          const platform = integration.providerIdentifier;
++          const platformPolicy = policy?.platforms?.[platform];
++
++          let contentType = inputData.contentType || 'default';
++          if (platform === 'youtube' && contentType === 'default') {
++            contentType = 'short';
++          }
++          const slots =
++            platformPolicy?.[contentType] ||
++            platformPolicy?.default ||
++            platformPolicy?.short;
++
++          if (!slots?.length) {
++            return {
++              date: await this._postsService.findFreeDateTime(
++                org.id,
++                inputData.integrationId
++              ),
++              platform,
++              timezone: 'UTC',
++              source: 'native-postiz-fallback',
++            };
++          }
++
++          const now = dayjs();
++          const horizon = now.add(21, 'day');
++          const posts = await this._postsService.getPosts(org.id, {
++            startDate: now.utc().format('YYYY-MM-DDTHH:mm:ss'),
++            endDate: horizon.utc().format('YYYY-MM-DDTHH:mm:ss'),
++            customer: undefined,
++          } as any);
++          const occupied = new Set(
++            (posts || [])
++              .filter(
++                (p: any) =>
++                  p.integration?.id === inputData.integrationId &&
++                  p.state !== 'ERROR'
++              )
++              .map((p: any) =>
++                dayjs(p.publishDate).utc().format('YYYY-MM-DDTHH:mm')
++              )
++          );
++
++          const candidates: {
++            utc: dayjs.Dayjs;
++            local: dayjs.Dayjs;
++            weight: number;
++          }[] = [];
++          const localNow = now.tz(zone);
++          for (let offset = 0; offset <= 21; offset++) {
++            const localDay = localNow.startOf('day').add(offset, 'day');
++            for (const slot of slots) {
++              if (localDay.day() !== slot.day) continue;
++              const parts = slot.time.split(':').map(Number);
++              const local = localDay
++                .hour(parts[0])
++                .minute(parts[1])
++                .second(0)
++                .millisecond(0);
++              if (!local.isAfter(localNow.add(5, 'minute'))) continue;
++              const asUtc = local.utc();
++              const key = asUtc.format('YYYY-MM-DDTHH:mm');
++              if (occupied.has(key)) continue;
++              candidates.push({
++                utc: asUtc,
++                local,
++                weight: slot.weight || 0,
++              });
++            }
++          }
++
++          candidates.sort((a, b) => {
++            const dayA = a.local.startOf('day').valueOf();
++            const dayB = b.local.startOf('day').valueOf();
++            if (dayA !== dayB) return dayA - dayB;
++            if (a.weight !== b.weight) return b.weight - a.weight;
++            return a.local.valueOf() - b.local.valueOf();
++          });
++
++          const selected = candidates[0];
++          if (!selected) {
++            return { error: 'No free weekly slot found in the next 21 days.' };
++          }
+           return {
+-            date: await this._postsService.findFreeDateTime(org.id, inputData.integrationId),
++            date: selected.utc.format('YYYY-MM-DDTHH:mm:ss[Z]'),
++            localDate: selected.local.format('YYYY-MM-DD HH:mm'),
++            timezone: zone,
++            platform,
++            source: 'weekly-creator-policy',
++            alternatives: candidates
++              .slice(1, 4)
++              .map((p) => p.local.format('YYYY-MM-DD HH:mm')),
+           };
+         } catch (err) {
+           const message = err instanceof Error ? err.message : String(err);
+diff --git a/libraries/nestjs-libraries/src/chat/tools/set.posting.times.tool.ts b/libraries/nestjs-libraries/src/chat/tools/set.posting.times.tool.ts
+new file mode 100644
+index 0000000..f2aa108
+--- /dev/null
++++ b/libraries/nestjs-libraries/src/chat/tools/set.posting.times.tool.ts
+@@ -0,0 +1,77 @@
++import { AgentToolInterface } from '@gitroom/nestjs-libraries/chat/agent.tool.interface';
++import { createTool } from '@mastra/core/tools';
++import { z } from 'zod';
++import { Injectable } from '@nestjs/common';
++import { IntegrationService } from '@gitroom/nestjs-libraries/database/prisma/integrations/integration.service';
++import { checkAuth } from '@gitroom/nestjs-libraries/chat/auth.context';
++import dayjs from 'dayjs';
++import utc from 'dayjs/plugin/utc';
++import timezone from 'dayjs/plugin/timezone';
++
++dayjs.extend(utc);
++dayjs.extend(timezone);
++
++@Injectable()
++export class SetPostingTimesTool implements AgentToolInterface {
++  constructor(private _integrationService: IntegrationService) {}
++  name = 'setPostingTimesTool';
++
++  run() {
++    return createTool({
++      id: 'setPostingTimesTool',
++      description:
++        'Set the native Postiz daily fallback posting times for one channel using local wall-clock times. The tool converts them to Postiz UTC minutes using the requested timezone. Use only when the user explicitly asks to change channel posting-time configuration; weekly best-day selection remains handled by nextPostingSlotTool.',
++      inputSchema: z.object({
++        integrationId: z.string().min(1),
++        localTimes: z
++          .array(z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/))
++          .min(1)
++          .max(8),
++        timezone: z.string().optional().default('Europe/Paris'),
++      }),
++      outputSchema: z.object({
++        localTimes: z.array(z.string()).optional(),
++        utcMinutes: z.array(z.number()).optional(),
++        timezone: z.string().optional(),
++        error: z.string().optional(),
++      }),
++      execute: async (inputData, context) => {
++        checkAuth(inputData, context);
++        try {
++          const orgId = JSON.parse(
++            (context?.requestContext as any)?.get('organization') as string
++          ).id;
++          const today = dayjs().tz(inputData.timezone).format('YYYY-MM-DD');
++          const utcMinutes = inputData.localTimes.map((time) => {
++            const local = dayjs.tz(
++              today + 'T' + time + ':00',
++              inputData.timezone
++            );
++            const converted = local.utc();
++            return converted.hour() * 60 + converted.minute();
++          });
++
++          await this._integrationService.setTimes(
++            orgId,
++            inputData.integrationId,
++            {
++              time: utcMinutes.map((time) => ({ time })),
++            } as any
++          );
++
++          return {
++            localTimes: inputData.localTimes,
++            utcMinutes,
++            timezone: inputData.timezone,
++          };
++        } catch (err) {
++          return {
++            error:
++              'Failed to set posting times: ' +
++              (err instanceof Error ? err.message : String(err)),
++          };
++        }
++      },
++    });
++  }
++}
+diff --git a/libraries/nestjs-libraries/src/chat/tools/tool.list.ts b/libraries/nestjs-libraries/src/chat/tools/tool.list.ts
+index c584194..3532619 100644
+--- a/libraries/nestjs-libraries/src/chat/tools/tool.list.ts
++++ b/libraries/nestjs-libraries/src/chat/tools/tool.list.ts
+@@ -20,6 +20,8 @@ import { UploadWidgetStatusTool } from '@gitroom/nestjs-libraries/chat/tools/upl
+ import { UploadLocalMediaTool } from '@gitroom/nestjs-libraries/chat/tools/upload.local.media.tool';
+ import { TranscribeLocalMediaTool } from '@gitroom/nestjs-libraries/chat/tools/transcribe.local.media.tool';
+ import { NextPostingSlotTool } from '@gitroom/nestjs-libraries/chat/tools/next.posting.slot.tool';
++import { ChannelAnalyticsTool, PostAnalyticsTool } from '@gitroom/nestjs-libraries/chat/tools/analytics.tool';
++import { SetPostingTimesTool } from '@gitroom/nestjs-libraries/chat/tools/set.posting.times.tool';
+ 
+ export const toolList = [
+   IntegrationListTool,
+@@ -41,6 +43,9 @@ export const toolList = [
+   UploadLocalMediaTool,
+   TranscribeLocalMediaTool,
+   NextPostingSlotTool,
++  ChannelAnalyticsTool,
++  PostAnalyticsTool,
++  SetPostingTimesTool,
+   UploadWidgetTool,
+   UploadWidgetTicketTool,
+   UploadWidgetStatusTool,
+diff --git a/package.json b/package.json
+index 5c87482..212026b 100644
+--- a/package.json
++++ b/package.json
+@@ -15,7 +15,7 @@
+     "dev-backend": "pnpm run --filter ./apps/backend --filter ./apps/frontend --parallel dev",
+     "pm2": "pnpm run pm2-run",
+     "publish-sdk": "pnpm run --filter ./apps/sdk publish",
+-    "pm2-run": "pm2 delete all || true && pnpm run prisma-db-push && pnpm run --parallel pm2 && pm2 logs",
++    "pm2-run": "pm2 delete all || true && pnpm run prisma-db-push && pnpm run --parallel pm2 && pm2 start scripts/backend-health-guard.cjs --name backend-health-guard && pm2 logs",
+     "dev:stripe": "pnpm dlx concurrently \"stripe listen --forward-to localhost:3000/stripe\" \"pnpm run dev\"",
+     "build": "pnpm -r --workspace-concurrency=1 --filter ./apps/frontend --filter ./apps/backend --filter ./apps/orchestrator run build",
+     "build:backend": "rm -rf apps/backend/dist && pnpm --filter ./apps/backend run build",
+diff --git a/scripts/backend-health-guard.cjs b/scripts/backend-health-guard.cjs
+new file mode 100644
+index 0000000..90a46c3
+--- /dev/null
++++ b/scripts/backend-health-guard.cjs
+@@ -0,0 +1,62 @@
++const net = require('net');
++const { spawnSync } = require('child_process');
++
++const STARTUP_GRACE_MS = Number(
++  process.env.POSTIZ_BACKEND_GUARD_GRACE_MS || 60000
++);
++const INTERVAL_MS = Number(
++  process.env.POSTIZ_BACKEND_GUARD_INTERVAL_MS || 15000
++);
++const FAILURES_BEFORE_RESTART = Number(
++  process.env.POSTIZ_BACKEND_GUARD_FAILURES || 3
++);
++const COOLDOWN_MS = Number(
++  process.env.POSTIZ_BACKEND_GUARD_COOLDOWN_MS || 120000
++);
++
++let failures = 0;
++let lastRestart = 0;
++
++function probe() {
++  return new Promise((resolve) => {
++    const socket = net.createConnection({ host: '127.0.0.1', port: 3000 });
++    const done = (ok) => {
++      socket.destroy();
++      resolve(ok);
++    };
++    socket.setTimeout(2500);
++    socket.once('connect', () => done(true));
++    socket.once('timeout', () => done(false));
++    socket.once('error', () => done(false));
++  });
++}
++
++async function check() {
++  const ok = await probe();
++  if (ok) {
++    failures = 0;
++    return;
++  }
++
++  failures += 1;
++  if (
++    failures >= FAILURES_BEFORE_RESTART &&
++    Date.now() - lastRestart >= COOLDOWN_MS
++  ) {
++    console.error(
++      '[backend-health-guard] backend port 3000 unavailable for ' +
++        failures +
++        ' checks; restarting backend'
++    );
++    spawnSync('pm2', ['restart', 'backend', '--update-env'], {
++      stdio: 'inherit',
++    });
++    lastRestart = Date.now();
++    failures = 0;
++  }
++}
++
++setTimeout(() => {
++  check();
++  setInterval(check, INTERVAL_MS);
++}, STARTUP_GRACE_MS);
+-- 
+2.53.0
+
+
+From 8e4f58e247e8a29817752ceeda4795d4bcf40e42 Mon Sep 17 00:00:00 2001
+From: cloud9-postiz-builder <root@cloud9.local>
+Date: Sat, 26 Sep 2026 19:40:11 +0200
+Subject: [PATCH 4/6] fix: reject corrupted Unicode before publishing
+
+---
+ .../src/database/prisma/posts/posts.service.ts            | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/libraries/nestjs-libraries/src/database/prisma/posts/posts.service.ts b/libraries/nestjs-libraries/src/database/prisma/posts/posts.service.ts
+index 5d5508b..74ecf83 100644
+--- a/libraries/nestjs-libraries/src/database/prisma/posts/posts.service.ts
++++ b/libraries/nestjs-libraries/src/database/prisma/posts/posts.service.ts
+@@ -916,6 +916,14 @@ export class PostsService {
+     creationMethod: CreationMethod,
+     keepGroup = false
+   ): Promise<any[]> {
++    // U+FFFD means text was already irreversibly damaged by an upstream
++    // encoding boundary. Fail closed instead of publishing replacement glyphs.
++    if (JSON.stringify(body).includes('\uFFFD')) {
++      throw new BadRequestException(
++        'Post contains Unicode replacement characters (U+FFFD). Fix the text encoding before publishing.'
++      );
++    }
++
+     const postList = [];
+     for (const post of body.posts) {
+       if (
+-- 
+2.53.0
+
+
+From 5fc60d4510eda2e02c1b7eb2686febfca4422c74 Mon Sep 17 00:00:00 2001
+From: cloud9-postiz-builder <root@cloud9.local>
+Date: Sat, 26 Sep 2026 20:38:23 +0200
+Subject: [PATCH 5/6] feat: teach Postiz agent creator voice
+
+---
+ .../nestjs-libraries/src/chat/load.tools.service.ts  | 10 +++++++++-
+ .../src/chat/tools/posts.list.tool.ts                | 12 +++++++++++-
+ 2 files changed, 20 insertions(+), 2 deletions(-)
+
+diff --git a/libraries/nestjs-libraries/src/chat/load.tools.service.ts b/libraries/nestjs-libraries/src/chat/load.tools.service.ts
+index 0969b96..4cf6b04 100644
+--- a/libraries/nestjs-libraries/src/chat/load.tools.service.ts
++++ b/libraries/nestjs-libraries/src/chat/load.tools.service.ts
+@@ -87,7 +87,15 @@ export class LoadToolsService {
+       - Before scheduling a post, ask for confirmation only when the user has not already explicitly instructed you to publish or schedule it in the current request. An explicit imperative such as publish, schedule, or post this today counts as confirmation; do not ask twice.
+       - When the user gives a local filesystem path and uploadLocalMediaTool is available, import it with uploadLocalMediaTool before scheduling. Never pass a raw filesystem path as an attachment.
+       - For a local video or audio file, use transcribeLocalMediaTool before writing the caption or description so your copy is grounded in the actual spoken content.
+-      - If the user asks you to match or reference another connected account recent style, inspect recent posts with postsListTool and use the latest relevant published post as a style reference without copying it verbatim.
++      - CREATOR VOICE IS THE DEFAULT, not an optional flourish. Before drafting copy for an established connected creator channel, inspect recent PUBLISHED posts from that exact integration with postsListTool (use integrationId and a sufficiently wide recent date window). Use several recent examples to infer rhythm, emoji density, CTA structure and recurring vocabulary. Do not copy a previous caption verbatim.
++      - For the publishing creator / @creator and Creator Podcast, write as the creator speaking, not as an AI, journalist, community manager or outside narrator. Prefer first person singular, direct address, or a standalone punchline. A neutral third-person summary is wrong unless the user explicitly asks for one.
++      - NEVER write meta-summary phrases such as "dans cet extrait", "dans cette vidéo", "le sketch", "ce sketch", "le contenu montre", "on rebondit sur", "on parle de", or equivalent boilerplate. Do not explain the joke. Write the line that belongs under the clip.
++      - Correctly identify the source format from the transcript/context. A clip from Creator Podcast or News Commentary is a podcast excerpt unless the user/context explicitly says it is stand-up. Never call a podcast excerpt a sketch just because it is comedic.
++      - Default caption shape for Creator/Creator Podcast short clips: (1) a short punchy hook/title, often uppercase and optionally framed by 1-2 relevant emojis when that matches recent posts; (2) one concise original sentence carrying the comic angle, dry sarcasm, absurdity or self-deprecation; (3) only then the relevant show/podcast CTA and restrained hashtags. The joke/punchline must come before promotional boilerplate.
++      - Style target: oral French, concise, slightly sarcastic, dry/absurd when appropriate, confident but not over-written. Avoid corporate language, explanatory prose, SEO filler, generic hype, fake enthusiasm and phrases that sound machine-generated.
++      - Ground jokes in the actual transcript. You may compress or sharpen an idea, but never invent a quote, event, personal experience, factual claim or political position that is not supported by the source/user. For political material, preserve the creator's comedic premise without adding persuasion or calls to political action.
++      - For YouTube Shorts, keep the title short and native, and write the description in the same creator voice. Do not switch back to documentary third-person prose just because the platform is YouTube.
++      - If the user explicitly asks to match/reference another connected account, inspect that account's recent published posts too and blend only the reusable style traits, never exact wording.
+       - When the user asks for the next or best configured posting time and did not give an exact clock time, use nextPostingSlotTool for the target channel instead of inventing a time.
+       - For a YouTube Short or short social clip, call nextPostingSlotTool with contentType=short; use contentType=long only for long-form YouTube.
+       - The timing policy is generic for the creator and content format. Never change the schedule based on a political viewpoint, party, candidate, or political topic.
+diff --git a/libraries/nestjs-libraries/src/chat/tools/posts.list.tool.ts b/libraries/nestjs-libraries/src/chat/tools/posts.list.tool.ts
+index a22ed04..12b9963 100644
+--- a/libraries/nestjs-libraries/src/chat/tools/posts.list.tool.ts
++++ b/libraries/nestjs-libraries/src/chat/tools/posts.list.tool.ts
+@@ -52,6 +52,10 @@ Posts cannot be deleted through the Postiz tools - if the user wants to delete a
+           .string()
+           .optional()
+           .describe('Optional customer (group) id to filter the channels by'),
++        integrationId: z
++          .string()
++          .optional()
++          .describe('Optional exact channel integration id. When set, only posts from that channel are returned.'),
+       }),
+       outputSchema: z.object({
+         output: z.object({
+@@ -88,7 +92,13 @@ Posts cannot be deleted through the Postiz tools - if the user wants to delete a
+ 
+         return {
+           output: {
+-            posts: (posts || []).map((p: any) => ({
++            posts: (posts || [])
++              .filter(
++                (p: any) =>
++                  !inputData.integrationId ||
++                  p.integration?.id === inputData.integrationId
++              )
++              .map((p: any) => ({
+               id: p.id,
+               publishDate: dayjs(p.publishDate)
+                 .utc()
+-- 
+2.53.0
+
+
+From 0ebc9e8131a619aa1f6190625f9b32b022ceb0aa Mon Sep 17 00:00:00 2001
+From: cloud9-postiz-builder <root@cloud9.local>
+Date: Sat, 26 Sep 2026 21:32:31 +0200
+Subject: [PATCH 6/6] feat: externalize Postiz editorial profile
+
+---
+ .../src/chat/load.tools.service.ts            | 30 +++++++++++++------
+ 1 file changed, 21 insertions(+), 9 deletions(-)
+
+diff --git a/libraries/nestjs-libraries/src/chat/load.tools.service.ts b/libraries/nestjs-libraries/src/chat/load.tools.service.ts
+index 4cf6b04..65fb440 100644
+--- a/libraries/nestjs-libraries/src/chat/load.tools.service.ts
++++ b/libraries/nestjs-libraries/src/chat/load.tools.service.ts
+@@ -8,6 +8,7 @@ import { ModuleRef } from '@nestjs/core';
+ import { toolList } from '@gitroom/nestjs-libraries/chat/tools/tool.list';
+ import { AgentToolInterface } from '@gitroom/nestjs-libraries/chat/agent.tool.interface';
+ import dayjs from 'dayjs';
++import { readFileSync } from 'fs';
+ 
+ export const AgentState = object({
+   proverbs: array(string()).default([]),
+@@ -18,6 +19,18 @@ const renderArray = (list: string[], show: boolean) => {
+   return list.map((p) => `- ${p}`).join('\n');
+ };
+ 
++const loadEditorialProfile = () => {
++  const profilePath =
++    process.env.POSTIZ_AGENT_STYLE_PATH || '/config/agent-style.md';
++  try {
++    const profile = readFileSync(profilePath, 'utf8').trim();
++    if (!profile) return '';
++    return `\n\n      External editorial profile (local source of truth):\n${profile}\n`;
++  } catch (err) {
++    return '';
++  }
++};
++
+ @Injectable()
+ export class LoadToolsService {
+   constructor(private _moduleRef: ModuleRef) {}
+@@ -55,6 +68,7 @@ export class LoadToolsService {
+         'Agent that helps schedule and list social media posts for users',
+       instructions: ({ requestContext }) => {
+         const ui: string = requestContext.get('ui' as never);
++        const editorialProfile = loadEditorialProfile();
+         return `
+       Global information:
+         - Date (UTC): ${dayjs().format('YYYY-MM-DD HH:mm:ss')}
+@@ -87,15 +101,13 @@ export class LoadToolsService {
+       - Before scheduling a post, ask for confirmation only when the user has not already explicitly instructed you to publish or schedule it in the current request. An explicit imperative such as publish, schedule, or post this today counts as confirmation; do not ask twice.
+       - When the user gives a local filesystem path and uploadLocalMediaTool is available, import it with uploadLocalMediaTool before scheduling. Never pass a raw filesystem path as an attachment.
+       - For a local video or audio file, use transcribeLocalMediaTool before writing the caption or description so your copy is grounded in the actual spoken content.
+-      - CREATOR VOICE IS THE DEFAULT, not an optional flourish. Before drafting copy for an established connected creator channel, inspect recent PUBLISHED posts from that exact integration with postsListTool (use integrationId and a sufficiently wide recent date window). Use several recent examples to infer rhythm, emoji density, CTA structure and recurring vocabulary. Do not copy a previous caption verbatim.
+-      - For the publishing creator / @creator and Creator Podcast, write as the creator speaking, not as an AI, journalist, community manager or outside narrator. Prefer first person singular, direct address, or a standalone punchline. A neutral third-person summary is wrong unless the user explicitly asks for one.
+-      - NEVER write meta-summary phrases such as "dans cet extrait", "dans cette vidéo", "le sketch", "ce sketch", "le contenu montre", "on rebondit sur", "on parle de", or equivalent boilerplate. Do not explain the joke. Write the line that belongs under the clip.
+-      - Correctly identify the source format from the transcript/context. A clip from Creator Podcast or News Commentary is a podcast excerpt unless the user/context explicitly says it is stand-up. Never call a podcast excerpt a sketch just because it is comedic.
+-      - Default caption shape for Creator/Creator Podcast short clips: (1) a short punchy hook/title, often uppercase and optionally framed by 1-2 relevant emojis when that matches recent posts; (2) one concise original sentence carrying the comic angle, dry sarcasm, absurdity or self-deprecation; (3) only then the relevant show/podcast CTA and restrained hashtags. The joke/punchline must come before promotional boilerplate.
+-      - Style target: oral French, concise, slightly sarcastic, dry/absurd when appropriate, confident but not over-written. Avoid corporate language, explanatory prose, SEO filler, generic hype, fake enthusiasm and phrases that sound machine-generated.
+-      - Ground jokes in the actual transcript. You may compress or sharpen an idea, but never invent a quote, event, personal experience, factual claim or political position that is not supported by the source/user. For political material, preserve the creator's comedic premise without adding persuasion or calls to political action.
+-      - For YouTube Shorts, keep the title short and native, and write the description in the same creator voice. Do not switch back to documentary third-person prose just because the platform is YouTube.
+-      - If the user explicitly asks to match/reference another connected account, inspect that account's recent published posts too and blend only the reusable style traits, never exact wording.
++      - CREATOR VOICE IS THE DEFAULT FOR EVERY CURRENT AND FUTURE CHANNEL. Before drafting copy for an established connected channel, inspect several recent PUBLISHED posts from that exact integration with postsListTool using integrationId. Infer that channel's current rhythm, length, emoji density, CTA structure, vocabulary and point of view. Never copy previous wording verbatim.
++      - If the target channel has no useful history yet, use the external editorial profile below as the fallback voice and adapt it to the target platform and context.
++      - Channel-specific rules in the external editorial profile override global editorial rules when they clearly match the target channel name/handle. Channels without an override still use the global profile plus their own learned history.
++      - Correctly identify the real source format from the transcript/context before writing. Do not assume every comedic clip is stand-up or a sketch.
++      - Ground all copy in the actual source/context. Never invent a quote, event, personal experience, factual claim or political position. For political material, preserve the source's comedic premise without adding persuasion or calls to political action.
++      - If the user explicitly asks to match/reference another connected account, inspect that account's recent published posts too and blend only reusable style traits, never exact wording.
++      ${editorialProfile}
+       - When the user asks for the next or best configured posting time and did not give an exact clock time, use nextPostingSlotTool for the target channel instead of inventing a time.
+       - For a YouTube Short or short social clip, call nextPostingSlotTool with contentType=short; use contentType=long only for long-form YouTube.
+       - The timing policy is generic for the creator and content format. Never change the schedule based on a political viewpoint, party, candidate, or political topic.
+-- 
+2.53.0
+
