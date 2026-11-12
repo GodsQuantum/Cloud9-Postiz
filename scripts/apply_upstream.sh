@@ -178,6 +178,18 @@ else
   rm -rf "$tmp"
   echo POSTIZ_PATCH_APPLIED postiz-omniroute.patch
 fi
+# First-party uploads are already bound to UPLOAD_DIRECTORY on self-hosted
+# installations. Resolve only exact same-origin /uploads files to that mount;
+# keep the default pinned-DNS SSRF guard for every other remote URL.
+if grep -Fqs 'FIRST_PARTY_UPLOAD_LOCAL_V1' libraries/nestjs-libraries/src/integrations/social/youtube.provider.ts;then
+  echo POSTIZ_NATIVE_FIRSTPARTY_LOCAL_YOUTUBE_MEDIA_DETECTED
+else
+  git apply --check "$PATCH_ROOT/postiz-youtube-firstparty-local-media.patch"
+  git apply "$PATCH_ROOT/postiz-youtube-firstparty-local-media.patch"
+  git add libraries/nestjs-libraries/src/integrations/social/youtube.provider.ts
+  git commit --no-gpg-sign -m "fix: stream first-party YouTube upload media locally without SSRF bypass" -q
+  echo POSTIZ_PATCH_APPLIED postiz-youtube-firstparty-local-media.patch
+fi
 printf '\n# CLOUD9_ROOT_MODE_0755\nRUN chmod 0755 /\n' >> Dockerfile.dev
 git diff --check
 test -f libraries/nestjs-libraries/src/upload/s3.storage.ts
@@ -185,4 +197,4 @@ test -f libraries/nestjs-libraries/src/upload/s3.uploader.ts
 test -f apps/frontend/src/helpers/upload.provider.ts
 grep -Rqs 'POSTIZ_IMAGE_BASE_URL' libraries/nestjs-libraries/src
 grep -Rqs 'POSTIZ_LOCAL_UPLOAD_CIDRS' apps/frontend/src
-echo POSTIZ_SEVEN_PATCH_FAMILIES_CONDITIONAL_APPLY_PASS
+echo POSTIZ_EIGHT_PATCH_FAMILIES_CONDITIONAL_APPLY_PASS

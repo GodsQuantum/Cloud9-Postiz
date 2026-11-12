@@ -17,9 +17,9 @@ for name in files:
 assert not failed,('PUBLIC_SOURCE_PERSONAL_DATA_DETECTED',failed)
 actual={f.name:hashlib.sha256(f.read_bytes()).hexdigest() for f in (base/'patches').glob('*.patch')}
 expected=json.loads((base/'tests/patch-sha256.json').read_text())
-assert len(actual)==len(expected)==7 and actual==expected
+assert len(actual)==len(expected)==8 and actual==expected
 assert not any('reel-cover' in n or 'cover-frame' in n for n in actual)
 assert all((base/n).is_file() for n in ['README.md','README.fr.md','README.zh-CN.md','LICENSE'])
 assert 'GNU AFFERO GENERAL PUBLIC LICENSE' in (base/'LICENSE').read_text()
 ET.parse(base/'docs/logo.svg');ET.parse(base/'docs/architecture.svg')
-print('POSTIZ_PUBLIC_SEVEN_PATCHES_PRIVACY_LICENSE_TRANSLATIONS_DIAGRAMS_PASS')
+print('POSTIZ_PUBLIC_EIGHT_PATCHES_PRIVACY_LICENSE_TRANSLATIONS_DIAGRAMS_PASS')

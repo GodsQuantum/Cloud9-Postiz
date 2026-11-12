@@ -1,0 +1,78 @@
+--- a/libraries/nestjs-libraries/src/integrations/social/youtube.provider.ts
++++ b/libraries/nestjs-libraries/src/integrations/social/youtube.provider.ts
+@@ -21,7 +21,8 @@
+ } from '@gitroom/nestjs-libraries/integrations/social.abstract';
+ import * as process from 'node:process';
+ import dayjs from 'dayjs';
+-import { createReadStream, statSync } from 'fs';
++import { createReadStream, realpathSync, statSync } from 'fs';
++import { resolve, sep } from 'node:path';
+ import { getSsrfSafeDispatcher } from '@gitroom/nestjs-libraries/dtos/webhooks/ssrf.safe.dispatcher';
+ import { setHeartbeatDetails } from '@gitroom/nestjs-libraries/temporal/temporal.heartbeat';
+ import { Rules } from '@gitroom/nestjs-libraries/chat/rules.description.decorator';
+@@ -459,7 +460,56 @@
+ 
+   // Resolves the total byte size of the media without loading it into memory:
+   // a HEAD request for remote URLs, statSync for local files.
++  // FIRST_PARTY_UPLOAD_LOCAL_V1: for self-hosted Postiz, first-party /uploads
++  // URLs can resolve to private DNS and fail the SSRF guard even though the
++  // same immutable asset is mounted in UPLOAD_DIRECTORY. Read it locally
++  // instead of weakening SSRF protection for arbitrary remote URLs.
++  private youtubeFirstPartyUploadPath(input: string): string | null {
++    if (!process.env.FRONTEND_URL || !process.env.UPLOAD_DIRECTORY) return null;
++    let source: URL;
++    let frontend: URL;
++    try {
++      source = new URL(input);
++      frontend = new URL(process.env.FRONTEND_URL);
++    } catch {
++      return null;
++    }
++    if (
++      source.origin !== frontend.origin ||
++      source.username ||
++      source.password ||
++      source.search ||
++      source.hash ||
++      !source.pathname.startsWith('/uploads/')
++    ) {
++      return null;
++    }
++
++    let local: string;
++    try {
++      const relative = decodeURIComponent(source.pathname.slice('/uploads/'.length));
++      if (!relative || relative.includes(String.fromCharCode(0)) || relative.startsWith('/') || relative.includes(String.fromCharCode(92))) {
++        throw new Error('Invalid upload path');
++      }
++      const base = realpathSync(resolve(process.env.UPLOAD_DIRECTORY));
++      local = realpathSync(resolve(base, relative));
++      if (!local.startsWith(base + sep) || !statSync(local).isFile()) {
++        throw new Error('Upload path escapes its media directory');
++      }
++    } catch {
++      throw new BadBody(
++        this.identifier,
++        '{}',
++        '{}',
++        'First-party uploaded video is missing or not readable locally'
++      );
++    }
++    return local;
++  }
++
+   private async youtubeMediaSize(path: string): Promise<number> {
++    const local = this.youtubeFirstPartyUploadPath(path);
++    if (local) return statSync(local).size;
+     if (path.indexOf('http') === 0) {
+       // the media path is user-influenced, keep the SSRF-safe dispatcher that
+       // this.fetch applies to every other outbound request. identity encoding
+@@ -490,6 +540,8 @@
+   // never hold the whole file in memory: a ranged GET for remote URLs, a ranged
+   // read stream for local files.
+   private async youtubeChunkStream(path: string, start: number, end: number) {
++    const local = this.youtubeFirstPartyUploadPath(path);
++    if (local) return createReadStream(local, { start, end });
+     if (path.indexOf('http') === 0) {
+       // identity encoding so the store keeps content-length and can answer
+       // with the requested range: a transformed (compressed) response loses
