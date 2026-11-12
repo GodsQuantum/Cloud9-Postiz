@@ -30,7 +30,6 @@ jobs:
           set -euo pipefail
           python3 tests/privacy.py
           test -f services/postiz-cli-auth/Dockerfile
-          ! grep -R -l -E '(/srv/lxc/|/home/user/|192[.]168[.]|@gmail[.]com|@hotmail[.]com)' services/postiz-cli-auth/
       - name: Fetch the official upstream application
         id: upstream
         run: |
