@@ -84,7 +84,22 @@ if [[ ! -f libraries/nestjs-libraries/src/upload/s3.storage.ts ]];then
     echo "S3_MAIL_COUNT_CHANGED=$count" >&2
     exit 1
   fi
-  for n in 0001 0002 0003;do
+  # Upstream 2.26 added email configuration above the old .env anchor.
+  # Apply the unchanged S3 source patch normally, rebasing only that
+  # documentation/config hunk when its surrounding upstream text changed.
+  git mailinfo "$tmp/initial.message" "$tmp/initial.diff" < "$tmp/mails/0001" >/dev/null
+  if git apply --check "$tmp/initial.diff" >/dev/null 2>&1;then
+    git am -3 "$tmp/mails/0001"
+  elif git apply --check --exclude=.env.example "$tmp/initial.diff" >/dev/null 2>&1;then
+    git apply --exclude=.env.example "$tmp/initial.diff"
+    python3 "$PATCH_ROOT/../scripts/rebase_s3_env.py" "$PWD" "$tmp/initial.diff"
+    git add -A
+    git diff --cached --check
+    git commit --no-gpg-sign -m "feat: S3 media backend rebased onto upstream environment template" -q
+  else
+    git am -3 "$tmp/mails/0001"
+  fi
+  for n in 0002 0003;do
     git am -3 "$tmp/mails/$n"
   done
   git mailinfo "$tmp/final.message" "$tmp/final.diff" < "$tmp/mails/0004" >/dev/null
@@ -147,7 +162,24 @@ if grep -qs 'location_id?: string' libraries/nestjs-libraries/src/dtos/posts/pro
    grep -qs '&location_id=' libraries/nestjs-libraries/src/integrations/social/instagram.provider.ts;then
   echo POSTIZ_NATIVE_INSTAGRAM_REEL_LOCATION_DETECTED
 else
-  apply_mail postiz-instagram-location.patch
+  # Recent upstream added alt_text to the media API URL. Preserve it when
+  # rebasing the narrower location_id capability for single-video reels.
+  if git apply --check "$PATCH_ROOT/postiz-instagram-location.patch" >/dev/null 2>&1;then
+    apply_mail postiz-instagram-location.patch
+  else
+    tmp="$(mktemp -d)"
+    git mailinfo "$tmp/message" "$tmp/location.diff" < "$PATCH_ROOT/postiz-instagram-location.patch" >/dev/null
+    dto=libraries/nestjs-libraries/src/dtos/posts/providers-settings/instagram.dto.ts
+    provider=libraries/nestjs-libraries/src/integrations/social/instagram.provider.ts
+    git apply --check --include="$dto" "$tmp/location.diff"
+    git apply --include="$dto" "$tmp/location.diff"
+    python3 "$PATCH_ROOT/../scripts/rebase_instagram_location.py" "$PWD"
+    git add "$dto" "$provider"
+    git diff --cached --check
+    git commit --no-gpg-sign -m "feat: rebase Instagram location on native upstream media URL" -q
+    rm -rf "$tmp"
+    echo POSTIZ_PATCH_APPLIED postiz-instagram-location.patch
+  fi
 fi
 if grep -Rqs 'POSTIZ_LLM_BASE_URL' apps/backend/src libraries/nestjs-libraries/src &&
    grep -Rqs 'POSTIZ_IMAGE_BASE_URL' apps/backend/src libraries/nestjs-libraries/src &&
