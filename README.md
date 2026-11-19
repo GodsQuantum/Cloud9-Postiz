@@ -23,7 +23,7 @@ Cloud9 does not maintain an independent, lagging copy of the Postiz application.
 | postiz-reddit-responsible-builder | Limit each Reddit submission to one subreddit |
 | postiz-instagram-location | Instagram Reel location_id |
 | postiz-omniroute | Configurable OpenAI-compatible text/image endpoint for Postiz generation and agents |
-| postiz-youtube-firstparty-local-media | Secure local streaming of same-origin Postiz uploads for YouTube, without disabling SSRF checks on external URLs |
+| postiz-youtube-firstparty-local-media | Secure local streaming of same-origin Postiz uploads; thumbnails wait for successful video processing and preserve the video identifier across retries, without weakening external SSRF checks |
 
 Two cover patches from the former local repository were **removed**: current upstream already supports Instagram Reel cover_url and TikTok video_cover_timestamp_ms.
 

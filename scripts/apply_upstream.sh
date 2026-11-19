@@ -222,6 +222,18 @@ else
   git commit --no-gpg-sign -m "fix: stream first-party YouTube upload media locally without SSRF bypass" -q
   echo POSTIZ_PATCH_APPLIED postiz-youtube-firstparty-local-media.patch
 fi
+# Keep upload and thumbnail finalization in the same YouTube patch family.
+# Behavioral checks detect a native equivalent before any source rewrite.
+if node "$PATCH_ROOT/../tests/youtube-thumbnail-processing.test.cjs" "$PWD" >/dev/null 2>&1;then
+  echo POSTIZ_NATIVE_YOUTUBE_THUMBNAIL_PROCESSING_DETECTED
+else
+  python3 "$PATCH_ROOT/../scripts/rebase_youtube_thumbnail_processing.py" "$PWD"
+  node "$PATCH_ROOT/../tests/youtube-thumbnail-processing.test.cjs" "$PWD"
+  git add libraries/nestjs-libraries/src/integrations/social/youtube.provider.ts
+  git diff --cached --check
+  git commit --no-gpg-sign -m "fix: wait for YouTube processing before applying thumbnails" -q
+  echo POSTIZ_YOUTUBE_THUMBNAIL_PROCESSING_APPLIED
+fi
 printf '\n# CLOUD9_ROOT_MODE_0755\nRUN chmod 0755 /\n' >> Dockerfile.dev
 git diff --check
 test -f libraries/nestjs-libraries/src/upload/s3.storage.ts
