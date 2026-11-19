@@ -19,7 +19,7 @@ L'objectif est de **ne pas maintenir un fork complet divergent** : GitHub récup
 - Garde-fou Reddit : un seul subreddit par publication.
 - Identifiant de lieu pour Reel Instagram.
 - Routage du texte et des images IA vers un serveur compatible OpenAI.
-- Lecture locale sécurisée des médias YouTube hébergés dans /uploads sans désactiver la protection SSRF.
+- Lecture locale sécurisée des médias YouTube hébergés dans /uploads ; application des miniatures après traitement réussi et conservation de l’identifiant vidéo lors des reprises, sans désactiver la protection SSRF.
 
 Les deux anciens correctifs pour couvertures Instagram/TikTok ne sont plus appliqués, car la version officielle les possède déjà.
 
